@@ -12,8 +12,9 @@ android {
         applicationId = "com.papercontrol.app"
         minSdk = 28
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // CI passes the run number and the tag, so every release installs over the previous one.
+        versionCode = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
+        versionName = System.getenv("VERSION_NAME")?.removePrefix("v") ?: "0.1.0"
 
         ndk {
             // LiteRT-LM ships native libraries for these two ABIs only.
@@ -21,9 +22,24 @@ android {
         }
     }
 
+    // Release signing comes from the environment (GitHub Actions secrets), never from the repo.
+    // Without it, release builds are produced unsigned.
+    val keystore = System.getenv("RELEASE_KEYSTORE")?.let { file(it) }?.takeIf { it.exists() }
+    signingConfigs {
+        if (keystore != null) {
+            create("release") {
+                storeFile = keystore
+                storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS") ?: "papercontrol"
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD") ?: System.getenv("RELEASE_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (keystore != null) signingConfig = signingConfigs.getByName("release")
         }
     }
 

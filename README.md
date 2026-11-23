@@ -101,6 +101,32 @@ reasons and lets you move pages, split them off or join documents before saving.
 The APK is at `app/build/outputs/apk/debug/app-debug.apk`; CI builds it on every push.
 Android 9 or newer. The optional AI model needs about 3 GB of free memory.
 
+### Signed releases (GitHub Actions)
+
+The `release` job builds a signed APK on every push to `main`, on every `v*` tag, and when
+started by hand (Actions → Build → Run workflow). For a `v*` tag it also publishes a GitHub
+release with the APK attached. Version code is the run number, so each build installs over
+the previous one.
+
+It needs two repository secrets (Settings → Secrets and variables → Actions → New
+repository secret):
+
+| Secret | Value |
+|---|---|
+| `RELEASE_KEYSTORE_BASE64` | The keystore file, base64 encoded: `base64 -w0 papercontrol-release.jks` |
+| `RELEASE_KEYSTORE_PASSWORD` | The keystore password |
+
+The key alias is `papercontrol`, and the key password equals the keystore password; set
+`RELEASE_KEY_ALIAS` / `RELEASE_KEY_PASSWORD` in the workflow if yours differ. The keystore
+is never committed. Keep a copy somewhere safe: an installed app only accepts updates signed
+with the same key.
+
+To publish a release:
+
+```
+git tag v0.2.0 && git push origin v0.2.0
+```
+
 ## Permissions
 
 | Permission | Why |

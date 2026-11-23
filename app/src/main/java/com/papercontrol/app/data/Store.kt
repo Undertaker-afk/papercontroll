@@ -5,7 +5,11 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.papercontrol.app.core.DeadlineKind
+import com.papercontrol.app.core.Expense
 import com.papercontrol.app.core.MatchAlgorithm
+import com.papercontrol.app.core.QuerySyntax
+import com.papercontrol.app.core.Similarity
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
@@ -16,8 +20,8 @@ import java.time.LocalDate
  * Every write bumps [version], which screens observe to reload.
  */
 object Store {
-    private lateinit var helper: Helper
-    private val db: SQLiteDatabase get() = helper.writableDatabase
+    @Volatile private var helper: Helper? = null
+    private val db: SQLiteDatabase get() = helper!!.writableDatabase
     private lateinit var appContext: Context
 
     private val _version = MutableStateFlow(0)
@@ -98,7 +102,7 @@ object Store {
 
     // ---------------------------------------------------------------- documents
 
-    private const val DOC_COLS = "d.id, d.title, d.correspondent_id, d.doctype_id, d.folder_id, d.created, d.added_at, d.modified_at, d.asn, d.content, d.fields, d.amount, d.currency, d.page_count, d.thumb, d.remote_task, (SELECT GROUP_CONCAT(tag_id) FROM doc_tags WHERE doc_id = d.id)"
+    private const val DOC_COLS = "d.id, d.title, d.correspondent_id, d.doctype_id, d.folder_id, d.created, d.added_at, d.modified_at, d.asn, d.content, d.fields, d.amount, d.currency, d.page_count, d.thumb, d.remote_task, (SELECT GROUP_CONCAT(tag_id) FROM doc_tags WHERE doc_id = d.id), d.remote_id, d.deleted_at, d.phash, d.duplicate_of"
 
     private fun doc(c: Cursor) = Document(
         id = c.getLong(0),
@@ -118,38 +122,64 @@ object Store {
         thumbPath = c.getString(14),
         remoteTask = c.getString(15),
         tagIds = c.getString(16)?.split(',')?.mapNotNull { it.toLongOrNull() }.orEmpty(),
+        remoteId = c.longOrNull(17),
+        deletedAt = c.longOrNull(18),
+        pageHash = c.longOrNull(19),
+        duplicateOf = c.longOrNull(20),
     )
 
     fun document(id: Long): Document? =
         db.rawQuery("SELECT $DOC_COLS FROM documents d WHERE d.id = ?", arrayOf(id.toString())).use { c -> if (c.moveToFirst()) doc(c) else null }
 
-    fun documents(f: Filter, limit: Int = 500): List<Document> {
+    /** Documents matching [f]; [ids] restricts to those ids (search by meaning), in that order when sorting by relevance. */
+    fun documents(f: Filter, limit: Int = 500, ids: List<Long>? = null): List<Document> {
         val where = mutableListOf<String>()
         val args = mutableListOf<String>()
-        val q = QueryParser.parse(f.query, this)
-        val tagIds = f.tagIds + q.tagIds
+        val q = QuerySyntax.parse(f.query)
+        where += if (f.trash) "d.deleted_at IS NOT NULL" else "d.deleted_at IS NULL"
+        fun named(kind: LabelKind, name: String): Long =
+            labels(kind).let { all -> all.firstOrNull { it.name.equals(name, true) } ?: all.firstOrNull { it.name.startsWith(name, true) } }?.id ?: -1L
+        val tagIds = f.tagIds + q.tags.map { named(LabelKind.TAG, it) }
         for (t in tagIds) { where += "EXISTS (SELECT 1 FROM doc_tags WHERE doc_id = d.id AND tag_id = ?)"; args += t.toString() }
-        (f.correspondentId ?: q.correspondentId)?.let { where += "d.correspondent_id = ?"; args += it.toString() }
-        (f.docTypeId ?: q.docTypeId)?.let { where += "d.doctype_id = ?"; args += it.toString() }
-        (f.folderId ?: q.folderId)?.let { where += "d.folder_id = ?"; args += it.toString() }
+        for (t in q.notTags.map { named(LabelKind.TAG, it) }) { where += "NOT EXISTS (SELECT 1 FROM doc_tags WHERE doc_id = d.id AND tag_id = ?)"; args += t.toString() }
+        (f.correspondentId ?: q.correspondent?.let { named(LabelKind.CORRESPONDENT, it) })?.let { where += "d.correspondent_id = ?"; args += it.toString() }
+        (f.docTypeId ?: q.type?.let { named(LabelKind.DOCTYPE, it) })?.let { where += "d.doctype_id = ?"; args += it.toString() }
+        (f.folderId ?: q.folder?.let { named(LabelKind.FOLDER, it) })?.let { where += "d.folder_id = ?"; args += it.toString() }
         q.asn?.let { where += "d.asn = ?"; args += it.toString() }
-        q.year?.let { where += "substr(d.created, 1, 4) = ?"; args += it.toString() }
-        if (f.inboxOnly) where += "EXISTS (SELECT 1 FROM doc_tags dt JOIN labels l ON l.id = dt.tag_id WHERE dt.doc_id = d.id AND l.inbox = 1)"
-        f.from?.let { where += "d.created >= ?"; args += it.toString() }
-        f.to?.let { where += "d.created <= ?"; args += it.toString() }
-        if (q.text.isNotBlank()) {
+        (q.createdFrom ?: f.from)?.let { where += "d.created >= ?"; args += it.toString() }
+        (q.createdTo ?: f.to)?.let { where += "d.created <= ?"; args += it.toString() }
+        q.addedWithinDays?.let { where += "d.added_at >= ?"; args += (System.currentTimeMillis() - it * 86_400_000L).toString() }
+        q.amountMin?.let { where += "d.amount >= ?"; args += it.toString() }
+        q.amountMax?.let { where += "d.amount <= ?"; args += it.toString() }
+        val inbox = "EXISTS (SELECT 1 FROM doc_tags dt JOIN labels l ON l.id = dt.tag_id WHERE dt.doc_id = d.id AND l.inbox = 1)"
+        if (f.inboxOnly) where += inbox
+        for (flag in q.flags) when (flag.substringAfter(':')) {
+            "inbox" -> where += inbox
+            "due", "reminder", "deadline" -> where += "EXISTS (SELECT 1 FROM reminders r WHERE r.doc_id = d.id AND r.done = 0)"
+            "duplicate" -> where += "d.duplicate_of IS NOT NULL"
+            "payment" -> where += "d.fields LIKE '%\"payment\"%'"
+            "notes" -> where += "EXISTS (SELECT 1 FROM notes n WHERE n.doc_id = d.id)"
+            "asn" -> where += "d.asn IS NOT NULL"
+            "synced" -> where += "d.remote_id IS NOT NULL"
+        }
+        for ((name, value) in q.fields) {
+            where += "EXISTS (SELECT 1 FROM field_values v JOIN custom_fields cf ON cf.id = v.field_id WHERE v.doc_id = d.id AND cf.name = ? COLLATE NOCASE AND v.value LIKE ?)"
+            args += name; args += "%$value%"
+        }
+        if (q.text.isNotBlank() && ids == null) {
             val match = q.text.split(Regex("\\s+")).filter { it.isNotBlank() }
                 .joinToString(" ") { w -> "\"" + w.replace("\"", "") + "\"*" }
             where += "d.id IN (SELECT docid FROM docs_fts WHERE docs_fts MATCH ?)"
             args += match
         }
+        if (ids != null) where += if (ids.isEmpty()) "0" else "d.id IN (${ids.joinToString(",")})"
         val order = when (f.sort) {
-            SortBy.ADDED -> "d.added_at"
+            SortBy.ADDED -> if (f.trash) "d.deleted_at" else "d.added_at"
             SortBy.CREATED -> "COALESCE(d.created, '0000')"
             SortBy.TITLE -> "d.title COLLATE NOCASE"
             SortBy.AMOUNT -> "COALESCE(d.amount, 0)"
         } + if (f.descending) " DESC" else " ASC"
-        val sql = "SELECT $DOC_COLS FROM documents d" + (if (where.isEmpty()) "" else " WHERE " + where.joinToString(" AND ")) + " ORDER BY $order, d.id DESC LIMIT $limit"
+        val sql = "SELECT $DOC_COLS FROM documents d WHERE " + where.joinToString(" AND ") + " ORDER BY $order, d.id DESC LIMIT $limit"
         return try {
             db.rawQuery(sql, args.toTypedArray()).use { c -> c.map { doc(it) } }
         } catch (e: Exception) {
@@ -157,11 +187,18 @@ object Store {
         }
     }
 
-    fun count(inboxOnly: Boolean = false): Int = documents(Filter(inboxOnly = inboxOnly), Int.MAX_VALUE).size
+    fun count(inboxOnly: Boolean = false): Int =
+        db.rawQuery(
+            "SELECT COUNT(*) FROM documents d WHERE d.deleted_at IS NULL" +
+                if (inboxOnly) " AND EXISTS (SELECT 1 FROM doc_tags dt JOIN labels l ON l.id = dt.tag_id WHERE dt.doc_id = d.id AND l.inbox = 1)" else "",
+            null,
+        ).use { c -> c.moveToFirst(); c.getInt(0) }
+
+    fun trashCount(): Int = db.rawQuery("SELECT COUNT(*) FROM documents WHERE deleted_at IS NOT NULL", null).use { c -> c.moveToFirst(); c.getInt(0) }
 
     /** Content of every document for training the Auto classifier, with its current sorting. */
     fun trainingSet(): List<Document> =
-        db.rawQuery("SELECT $DOC_COLS FROM documents d ORDER BY d.id DESC LIMIT 3000", null).use { c -> c.map { doc(it) } }
+        db.rawQuery("SELECT $DOC_COLS FROM documents d WHERE d.deleted_at IS NULL ORDER BY d.id DESC LIMIT 3000", null).use { c -> c.map { doc(it) } }
 
     fun insertDocument(d: Document, pages: List<Page>): Long {
         var id = 0L
@@ -184,17 +221,60 @@ object Store {
         changed()
     }
 
-    fun deleteDocument(id: Long) {
+    /** Moves documents to the trash. They stay restorable for [TRASH_DAYS] days. */
+    fun trash(ids: Collection<Long>) {
+        val now = System.currentTimeMillis()
+        db.transaction { for (id in ids) execSQL("UPDATE documents SET deleted_at = ? WHERE id = ?", arrayOf<Any>(now, id)) }
+        changed()
+    }
+
+    fun restore(ids: Collection<Long>) {
+        db.transaction { for (id in ids) execSQL("UPDATE documents SET deleted_at = NULL WHERE id = ?", arrayOf<Any>(id)) }
+        changed()
+    }
+
+    const val TRASH_DAYS = 30
+
+    /** Deletes documents in the trash for longer than [TRASH_DAYS] days, or all of them. */
+    fun emptyTrash(all: Boolean = false) {
+        val cutoff = if (all) Long.MAX_VALUE else System.currentTimeMillis() - TRASH_DAYS * 86_400_000L
+        val ids = db.rawQuery("SELECT id FROM documents WHERE deleted_at IS NOT NULL AND deleted_at <= ?", arrayOf(cutoff.toString())).use { c -> c.map { it.getLong(0) } }
+        ids.forEach { purgeDocument(it) }
+    }
+
+    /** Deletes a document and its files for good. */
+    fun purgeDocument(id: Long) {
         pages(id).forEach { p -> File(p.path).delete(); p.originalPath?.let { File(it).delete() } }
         document(id)?.thumbPath?.let { File(it).delete() }
         db.transaction {
-            delete("pages", "doc_id = ?", arrayOf(id.toString()))
-            delete("doc_tags", "doc_id = ?", arrayOf(id.toString()))
-            delete("field_values", "doc_id = ?", arrayOf(id.toString()))
-            delete("notes", "doc_id = ?", arrayOf(id.toString()))
+            for (t in listOf("pages", "doc_tags", "field_values", "notes", "reminders", "embeddings")) delete(t, "doc_id = ?", arrayOf(id.toString()))
             delete("docs_fts", "docid = ?", arrayOf(id.toString()))
             delete("documents", "id = ?", arrayOf(id.toString()))
         }
+        changed()
+    }
+
+    // ---------------------------------------------------------------- bulk edits
+
+    fun bulkTag(ids: Collection<Long>, tagId: Long, add: Boolean) {
+        db.transaction {
+            for (id in ids) {
+                if (add) insertWithOnConflict("doc_tags", null, ContentValues().apply { put("doc_id", id); put("tag_id", tagId) }, SQLiteDatabase.CONFLICT_IGNORE)
+                else delete("doc_tags", "doc_id = ? AND tag_id = ?", arrayOf(id.toString(), tagId.toString()))
+                execSQL("UPDATE documents SET modified_at = ? WHERE id = ?", arrayOf<Any>(System.currentTimeMillis(), id))
+            }
+        }
+        changed()
+    }
+
+    fun bulkSet(ids: Collection<Long>, kind: LabelKind, labelId: Long?) {
+        val col = when (kind) {
+            LabelKind.CORRESPONDENT -> "correspondent_id"
+            LabelKind.DOCTYPE -> "doctype_id"
+            LabelKind.FOLDER -> "folder_id"
+            LabelKind.TAG -> return
+        }
+        db.transaction { for (id in ids) execSQL("UPDATE documents SET $col = ?, modified_at = ? WHERE id = ?", arrayOf<Any?>(labelId, System.currentTimeMillis(), id)) }
         changed()
     }
 
@@ -224,6 +304,7 @@ object Store {
         put("created", d.created?.toString()); put("added_at", d.addedAt); put("modified_at", d.modifiedAt); put("asn", d.asn)
         put("content", d.content); put("fields", d.fields); put("amount", d.amount); put("currency", d.currency)
         put("page_count", d.pageCount); put("thumb", d.thumbPath); put("remote_task", d.remoteTask)
+        put("remote_id", d.remoteId); put("deleted_at", d.deletedAt); put("phash", d.pageHash); put("duplicate_of", d.duplicateOf)
     }
 
     private fun writeTags(w: SQLiteDatabase, id: Long, tags: List<Long>) {
@@ -241,9 +322,29 @@ object Store {
     // ---------------------------------------------------------------- pages
 
     fun pages(docId: Long): List<Page> =
-        db.rawQuery("SELECT id, doc_id, idx, path, original, text, captured_at FROM pages WHERE doc_id = ? ORDER BY idx", arrayOf(docId.toString())).use { c ->
-            c.map { Page(it.getLong(0), it.getLong(1), it.getInt(2), it.getString(3), it.getString(4), it.getString(5) ?: "", it.getLong(6)) }
+        db.rawQuery("SELECT id, doc_id, idx, path, original, text, captured_at, ocr FROM pages WHERE doc_id = ? ORDER BY idx", arrayOf(docId.toString())).use { c ->
+            c.map { Page(it.getLong(0), it.getLong(1), it.getInt(2), it.getString(3), it.getString(4), it.getString(5) ?: "", it.getLong(6), it.getString(7) ?: "") }
         }
+
+    /** Removes one page (not the last one) and its files. */
+    fun deletePage(page: Page): Boolean {
+        val rest = pages(page.docId).filter { it.id != page.id }
+        if (rest.isEmpty()) return false
+        File(page.path).delete(); page.originalPath?.let { File(it).delete() }
+        db.delete("pages", "id = ?", arrayOf(page.id.toString()))
+        reorderPages(page.docId, rest.map { it.id })
+        document(page.docId)?.let { d ->
+            updateDocument(d.copy(pageCount = rest.size, content = rest.joinToString("\n\n") { it.text }, thumbPath = rest.first().path))
+        }
+        return true
+    }
+
+    /** Points a page at a new image file (after rotating), and the thumbnail too if it showed that page. */
+    fun replacePageImage(page: Page, newPath: String) {
+        db.execSQL("UPDATE pages SET path = ? WHERE id = ?", arrayOf<Any>(newPath, page.id))
+        db.execSQL("UPDATE documents SET thumb = ? WHERE id = ? AND thumb = ?", arrayOf<Any>(newPath, page.docId, page.path))
+        changed()
+    }
 
     fun reorderPages(docId: Long, pageIds: List<Long>) {
         db.transaction { pageIds.forEachIndexed { i, id -> execSQL("UPDATE pages SET idx = ? WHERE id = ? AND doc_id = ?", arrayOf<Any>(i, id, docId)) } }
@@ -268,18 +369,23 @@ object Store {
     }
 
     private fun pageValues(p: Page) = ContentValues().apply {
-        put("doc_id", p.docId); put("idx", p.index); put("path", p.path); put("original", p.originalPath); put("text", p.text); put("captured_at", p.capturedAt)
+        put("doc_id", p.docId); put("idx", p.index); put("path", p.path); put("original", p.originalPath); put("text", p.text); put("captured_at", p.capturedAt); put("ocr", p.ocr)
     }
 
     // ---------------------------------------------------------------- custom fields, notes, views
 
     fun customFields(): List<CustomField> =
-        db.rawQuery("SELECT id, name, type FROM custom_fields ORDER BY name COLLATE NOCASE", null).use { c ->
-            c.map { CustomField(it.getLong(0), it.getString(1), runCatching { FieldType.valueOf(it.getString(2)) }.getOrDefault(FieldType.TEXT)) }
+        db.rawQuery("SELECT id, name, type, options FROM custom_fields ORDER BY name COLLATE NOCASE", null).use { c ->
+            c.map {
+                CustomField(
+                    it.getLong(0), it.getString(1), runCatching { FieldType.valueOf(it.getString(2)) }.getOrDefault(FieldType.TEXT),
+                    it.getString(3)?.split('\n')?.filter { o -> o.isNotBlank() }.orEmpty(),
+                )
+            }
         }
 
     fun saveCustomField(f: CustomField): Long {
-        val v = ContentValues().apply { put("name", f.name.trim()); put("type", f.type.name) }
+        val v = ContentValues().apply { put("name", f.name.trim()); put("type", f.type.name); put("options", f.options.joinToString("\n")) }
         val id = if (f.id == 0L) db.insert("custom_fields", null, v) else { db.update("custom_fields", v, "id = ?", arrayOf(f.id.toString())); f.id }
         changed()
         return id
@@ -330,6 +436,139 @@ object Store {
 
     fun deleteView(id: Long) { db.delete("saved_views", "id = ?", arrayOf(id.toString())); changed() }
 
+    // ---------------------------------------------------------------- reminders
+
+    fun reminders(docId: Long? = null, openOnly: Boolean = false, until: LocalDate? = null): List<Reminder> {
+        val where = mutableListOf("d.deleted_at IS NULL")
+        val args = mutableListOf<String>()
+        docId?.let { where += "r.doc_id = ?"; args += it.toString() }
+        if (openOnly) where += "r.done = 0"
+        until?.let { where += "r.date <= ?"; args += it.toString() }
+        return db.rawQuery(
+            "SELECT r.id, r.doc_id, r.date, r.kind, r.note, r.done, r.notified, d.title FROM reminders r JOIN documents d ON d.id = r.doc_id WHERE ${where.joinToString(" AND ")} ORDER BY r.date",
+            args.toTypedArray(),
+        ).use { c ->
+            c.map {
+                Reminder(
+                    it.getLong(0), it.getLong(1), LocalDate.parse(it.getString(2)),
+                    runCatching { DeadlineKind.valueOf(it.getString(3)) }.getOrDefault(DeadlineKind.PAYMENT),
+                    it.getString(4) ?: "", it.getInt(5) != 0,
+                    it.getString(6)?.split(',')?.mapNotNull { n -> n.toIntOrNull() }?.toSet().orEmpty(),
+                    it.getString(7) ?: "",
+                )
+            }
+        }
+    }
+
+    fun saveReminder(r: Reminder): Long {
+        val v = ContentValues().apply {
+            put("doc_id", r.docId); put("date", r.date.toString()); put("kind", r.kind.name); put("note", r.note)
+            put("done", if (r.done) 1 else 0); put("notified", r.notified.joinToString(","))
+        }
+        val id = if (r.id == 0L) db.insert("reminders", null, v) else { db.update("reminders", v, "id = ?", arrayOf(r.id.toString())); r.id }
+        changed()
+        return id
+    }
+
+    fun deleteReminder(id: Long) { db.delete("reminders", "id = ?", arrayOf(id.toString())); changed() }
+
+    // ---------------------------------------------------------------- search vectors
+
+    fun embedding(docId: Long, model: String): FloatArray? =
+        db.rawQuery("SELECT vec FROM embeddings WHERE doc_id = ? AND model = ?", arrayOf(docId.toString(), model)).use { c ->
+            if (c.moveToFirst()) floats(c.getBlob(0)) else null
+        }
+
+    fun embeddings(model: String): Map<Long, FloatArray> =
+        db.rawQuery("SELECT e.doc_id, e.vec FROM embeddings e JOIN documents d ON d.id = e.doc_id WHERE e.model = ? AND d.deleted_at IS NULL", arrayOf(model)).use { c ->
+            val out = HashMap<Long, FloatArray>()
+            while (c.moveToNext()) out[c.getLong(0)] = floats(c.getBlob(1))
+            out
+        }
+
+    fun saveEmbedding(docId: Long, model: String, v: FloatArray) {
+        val buf = java.nio.ByteBuffer.allocate(v.size * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        v.forEach { buf.putFloat(it) }
+        db.insertWithOnConflict("embeddings", null, ContentValues().apply { put("doc_id", docId); put("model", model); put("vec", buf.array()); put("at", System.currentTimeMillis()) }, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    /** Documents without a vector for [model] yet (or changed since). */
+    fun unembedded(model: String, limit: Int = 50): List<Document> =
+        db.rawQuery(
+            "SELECT $DOC_COLS FROM documents d WHERE d.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.doc_id = d.id AND e.model = ? AND e.at >= d.modified_at) ORDER BY d.id DESC LIMIT $limit",
+            arrayOf(model),
+        ).use { c -> c.map { doc(it) } }
+
+    private fun floats(b: ByteArray): FloatArray {
+        val buf = java.nio.ByteBuffer.wrap(b).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        return FloatArray(b.size / 4) { buf.getFloat() }
+    }
+
+    // ---------------------------------------------------------------- duplicates, stats, sync
+
+    fun fingerprints(): List<Similarity.Fingerprint> {
+        val names = labels(LabelKind.CORRESPONDENT).associate { it.id to it.name }
+        return db.rawQuery("SELECT id, phash, amount, created, correspondent_id, substr(content, 1, 4000) FROM documents WHERE deleted_at IS NULL", null).use { c ->
+            c.map {
+                Similarity.Fingerprint(
+                    it.getLong(0), it.longOrNull(1), if (it.isNull(2)) null else it.getDouble(2),
+                    it.getString(3)?.let { d -> runCatching { LocalDate.parse(d) }.getOrNull() },
+                    it.longOrNull(4)?.let { id -> names[id] }, it.getString(5) ?: "",
+                )
+            }
+        }
+    }
+
+    /** Every dated document with an amount, for the expense overview. */
+    fun expenses(): List<Pair<Document, Expense>> {
+        val all = allLabels()
+        return documents(Filter(), Int.MAX_VALUE).mapNotNull { d ->
+            val date = d.created ?: return@mapNotNull null
+            val amount = d.amount ?: return@mapNotNull null
+            d to Expense(date, amount, d.currency, d.docTypeId?.let { all[it]?.name }, d.correspondentId?.let { all[it]?.name })
+        }
+    }
+
+    fun byRemoteId(remoteId: Long): Document? =
+        db.rawQuery("SELECT $DOC_COLS FROM documents d WHERE d.remote_id = ?", arrayOf(remoteId.toString())).use { c -> if (c.moveToFirst()) doc(c) else null }
+
+    /** Sets server-side ids without touching the modification time (so it does not count as a local edit). */
+    fun setRemote(docId: Long, remoteId: Long?, task: String?) {
+        db.execSQL("UPDATE documents SET remote_id = ?, remote_task = ? WHERE id = ?", arrayOf<Any?>(remoteId, task, docId))
+        changed()
+    }
+
+    fun setModified(docId: Long, at: Long) {
+        db.execSQL("UPDATE documents SET modified_at = ? WHERE id = ?", arrayOf<Any>(at, docId))
+    }
+
+    fun setPageHash(docId: Long, hash: Long?, duplicateOf: Long?) {
+        db.execSQL("UPDATE documents SET phash = ?, duplicate_of = ? WHERE id = ?", arrayOf<Any?>(hash, duplicateOf, docId))
+        changed()
+    }
+
+    /** The database file, for backups. Call [close] first when replacing it. */
+    fun databaseFile(): File = appContext.getDatabasePath("papercontrol.db")
+
+    fun close() { helper?.close() }
+
+    /** Hands [read] a consistent copy of the database file: the log is folded in and writers wait meanwhile. */
+    fun snapshot(read: (File) -> Unit) {
+        db.rawQuery("PRAGMA wal_checkpoint(FULL)", null).use { it.moveToFirst() }
+        db.beginTransaction()
+        try { read(databaseFile()) } finally { db.endTransaction() }
+    }
+
+    /** Rewrites stored file paths after a restore from another app folder. */
+    fun relocate(from: String, to: String) {
+        db.execSQL("UPDATE pages SET path = replace(path, ?, ?), original = replace(original, ?, ?)", arrayOf<Any>(from, to, from, to))
+        db.execSQL("UPDATE documents SET thumb = replace(thumb, ?, ?)", arrayOf<Any>(from, to))
+        changed()
+    }
+
+    /** Reopens after a restore. */
+    fun reopen() { helper = Helper(appContext); changed() }
+
     // ---------------------------------------------------------------- helpers
 
     private inline fun <T> Cursor.map(f: (Cursor) -> T): List<T> {
@@ -356,7 +595,7 @@ object Store {
         }
     }
 
-    private class Helper(context: Context) : SQLiteOpenHelper(context, "papercontrol.db", null, 1) {
+    private class Helper(context: Context) : SQLiteOpenHelper(context, "papercontrol.db", null, 2) {
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL("CREATE TABLE labels (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, name TEXT NOT NULL, color INTEGER NOT NULL, match TEXT NOT NULL DEFAULT '', algorithm TEXT NOT NULL, ci INTEGER NOT NULL DEFAULT 1, inbox INTEGER NOT NULL DEFAULT 0)")
             db.execSQL("CREATE TABLE documents (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, correspondent_id INTEGER, doctype_id INTEGER, folder_id INTEGER, created TEXT, added_at INTEGER NOT NULL, modified_at INTEGER NOT NULL, asn INTEGER, content TEXT, fields TEXT, amount REAL, currency TEXT, page_count INTEGER NOT NULL DEFAULT 0, thumb TEXT, remote_task TEXT)")
@@ -385,9 +624,23 @@ object Store {
             label(LabelKind.FOLDER, "Receipts", Palette.colors[1], algorithm = MatchAlgorithm.NONE)
             label(LabelKind.FOLDER, "Invoices", Palette.colors[2], algorithm = MatchAlgorithm.NONE)
             label(LabelKind.FOLDER, "Letters", Palette.colors[4], algorithm = MatchAlgorithm.NONE)
+            upgradeTo2(db)
         }
 
-        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+            if (oldVersion < 2) upgradeTo2(db)
+        }
+
+        /** Trash, duplicates, sync ids, page text positions, field choices, reminders, search vectors. */
+        private fun upgradeTo2(db: SQLiteDatabase) {
+            for (col in listOf("remote_id INTEGER", "deleted_at INTEGER", "phash INTEGER", "duplicate_of INTEGER")) db.execSQL("ALTER TABLE documents ADD COLUMN $col")
+            db.execSQL("ALTER TABLE pages ADD COLUMN ocr TEXT")
+            db.execSQL("ALTER TABLE custom_fields ADD COLUMN options TEXT")
+            db.execSQL("CREATE TABLE reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id INTEGER NOT NULL, date TEXT NOT NULL, kind TEXT NOT NULL, note TEXT, done INTEGER NOT NULL DEFAULT 0, notified TEXT)")
+            db.execSQL("CREATE INDEX reminders_date ON reminders (done, date)")
+            db.execSQL("CREATE TABLE embeddings (doc_id INTEGER NOT NULL, model TEXT NOT NULL, vec BLOB NOT NULL, at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (doc_id, model))")
+            db.execSQL("CREATE INDEX documents_remote ON documents (remote_id)")
+        }
     }
 }
 

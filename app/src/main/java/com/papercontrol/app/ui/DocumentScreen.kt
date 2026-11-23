@@ -163,7 +163,7 @@ fun DocumentScreen(id: Long, onBack: () -> Unit, onOpen: (Long) -> Unit) {
                             DropdownMenuItem(text = { Text("Edit date, ASN, amount") }, onClick = { menu = false; editMeta = true })
                             DropdownMenuItem(text = { Text("Delete", color = Ink.Danger) }, onClick = {
                                 menu = false
-                                scope.launch { withContext(Dispatchers.IO) { Store.deleteDocument(d.id) }; onBack() }
+                                scope.launch { withContext(Dispatchers.IO) { Store.trash(listOf(d.id)) }; onBack() }
                             })
                         }
                     }

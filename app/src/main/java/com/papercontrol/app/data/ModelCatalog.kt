@@ -53,6 +53,19 @@ object ModelCatalog {
         ),
     )
 
+    /** EmbeddingGemma 2 (Apache 2.0): turns text into vectors for search by meaning and "more like this". */
+    val embedding = ModelSpec(
+        id = "eg2-text-vision-440m",
+        title = "EmbeddingGemma 2 · 440M",
+        summary = "Search by meaning in 100+ languages.",
+        url = "$HF/litert-community/embeddinggemma-2-text-vision-440m-litert-lm/resolve/main/embeddinggemma-2-text-vision-440m.litertlm",
+        fileName = "embeddinggemma-2-text-vision-440m.litertlm",
+        approxMb = 388,
+    )
+
+    /** Identifies the vector space; vectors from another model or size are kept apart. */
+    const val EMBEDDING_KEY = "eg2-440m/256"
+
     fun resolve(config: Config): ModelSpec? =
         if (config.llmModelId == CUSTOM_LLM_ID) custom(config.llmCustomUrl)
         else models.firstOrNull { it.id == config.llmModelId } ?: models.first()
@@ -70,7 +83,7 @@ object ModelCatalog {
     fun dir(context: Context): File = File(context.filesDir, "models").apply { mkdirs() }
 
     fun deleteUnused(context: Context, config: Config) {
-        val keep = resolve(config)?.fileName?.takeIf { config.llmEnabled }
-        dir(context).listFiles()?.forEach { f -> if (keep == null || !f.name.startsWith(keep)) f.delete() }
+        val keep = listOfNotNull(resolve(config)?.fileName?.takeIf { config.llmEnabled }, embedding.fileName.takeIf { config.semanticSearch })
+        dir(context).listFiles()?.forEach { f -> if (keep.none { f.name.startsWith(it) }) f.delete() }
     }
 }

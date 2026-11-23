@@ -39,6 +39,7 @@ import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.IntOffset
@@ -58,6 +59,8 @@ class RevealAnim {
     val flash = Animatable(0f)
     /** The photo around the paper; fades to black. */
     val photo = Animatable(1f)
+    /** The page lifting out of the photo and straightening: 0 where it lay, 1 flat on the black. */
+    val peel = Animatable(0f)
     /** Scan band position over the paper: -0.15 (above) .. 1.15 (below). */
     val band = Animatable(-0.2f)
     /** Glow strength of the band (it fades in at the top edge and out at the bottom). */
@@ -110,6 +113,8 @@ fun RevealOverlay(
     cardRect: Rect?,
     /** The photo, as shown full screen. */
     photoRect: Rect,
+    /** Where the page's four corners are on screen while it still lies in the photo: tl, tr, br, bl of the upright page. */
+    quadScreen: List<Offset>,
 ) {
     val photo = remember(capture) { capture.photo.asImageBitmap() }
     val flat = remember(capture) { capture.flat.asImageBitmap() }
@@ -129,7 +134,15 @@ fun RevealOverlay(
         if (anim.photo.value > 0f) {
             Canvas(Modifier.fillMaxSize().graphicsLayer { alpha = anim.photo.value }) {
                 drawImage(photo, dstOffset = IntOffset(photoRect.left.roundToInt(), photoRect.top.roundToInt()), dstSize = IntSize(photoRect.width.roundToInt(), photoRect.height.roundToInt()))
+                drawSpotlight(photoRect, quadScreen, 0.55f)
             }
+        }
+        // The page itself, lifting out of the photo: its corners glide from where they lay to a flat rectangle.
+        if (anim.peel.value < 1f) {
+            val pe = FastOutSlowInEasing.transform(anim.peel.value)
+            val target = listOf(paperRect.topLeft, paperRect.topRight, paperRect.bottomRight, paperRect.bottomLeft)
+            val dst = List(4) { i -> Offset(quadScreen[i].x + (target[i].x - quadScreen[i].x) * pe, quadScreen[i].y + (target[i].y - quadScreen[i].y) * pe) }
+            Canvas(Modifier.fillMaxSize()) { drawWarped(capture.flat, dst) }
         }
 
         // Soft glow behind everything: the band's colour spill beside the paper, then the ring and aura.
@@ -175,7 +188,7 @@ fun RevealOverlay(
 
         // The paper.
         Canvas(Modifier.fillMaxSize().graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }) {
-            if (m >= 1f) return@Canvas
+            if (m >= 1f || anim.peel.value < 1f) return@Canvas
             val corner = (3.dp.toPx() + (24.dp.toPx() - 3.dp.toPx()) * mm)
             val paperPath = Path().apply { addRoundRect(androidx.compose.ui.geometry.RoundRect(rect, CornerRadius(corner))) }
             clipPath(paperPath) {
@@ -187,7 +200,7 @@ fun RevealOverlay(
                 }
                 clipRect(rect.left, rect.top, rect.right, min(rect.bottom, bandY)) {
                     drawImageIn(clean, rect)
-                    if (highlights != null) drawHighlights(clean, highlights, rect, bandY)
+                    drawHighlights(clean, highlights, rect, bandY)
                 }
                 // Inside the band: the print smears vertically, as if pulled through a scanner.
                 if (anim.bandGlow.value > 0f && m == 0f && bandY > rect.top - bandH && bandY < rect.bottom + bandH) {
@@ -248,6 +261,43 @@ fun RevealOverlay(
             Canvas(Modifier.fillMaxSize()) { drawRect(Color.White, alpha = anim.flash.value * 0.85f) }
         }
     }
+}
+
+/** Dims everything in the photo except the page that was found, so it is clear what was picked. */
+internal fun DrawScope.drawSpotlight(photoRect: Rect, quad: List<Offset>, alpha: Float) {
+    if (quad.size != 4) return
+    val path = Path().apply {
+        fillType = androidx.compose.ui.graphics.PathFillType.EvenOdd
+        addRect(photoRect)
+        moveTo(quad[0].x, quad[0].y); lineTo(quad[1].x, quad[1].y); lineTo(quad[2].x, quad[2].y); lineTo(quad[3].x, quad[3].y); close()
+    }
+    drawPath(path, Color.Black, alpha = alpha)
+}
+
+private val warpPaint = android.graphics.Paint().apply {
+    isFilterBitmap = true
+    colorFilter = android.graphics.ColorMatrixColorFilter(
+        android.graphics.ColorMatrix(floatArrayOf(0.88f, 0f, 0f, 0f, 4f, 0f, 0.88f, 0f, 0f, 4f, 0f, 0f, 0.88f, 0f, 6f, 0f, 0f, 0f, 1f, 0f))
+    )
+}
+
+/** Draws [bmp] with its four corners at [dst] (tl, tr, br, bl), in true perspective, on a 12 x 16 mesh. */
+internal fun DrawScope.drawWarped(bmp: android.graphics.Bitmap, dst: List<Offset>) {
+    val mw = 12
+    val mh = 16
+    val bw = bmp.width.toFloat()
+    val bh = bmp.height.toFloat()
+    val m = android.graphics.Matrix()
+    val ok = m.setPolyToPoly(
+        floatArrayOf(0f, 0f, bw, 0f, bw, bh, 0f, bh), 0,
+        floatArrayOf(dst[0].x, dst[0].y, dst[1].x, dst[1].y, dst[2].x, dst[2].y, dst[3].x, dst[3].y), 0, 4,
+    )
+    if (!ok) return
+    val verts = FloatArray((mw + 1) * (mh + 1) * 2)
+    var i = 0
+    for (r in 0..mh) for (c in 0..mw) { verts[i++] = bw * c / mw; verts[i++] = bh * r / mh }
+    m.mapPoints(verts)
+    drawIntoCanvas { it.nativeCanvas.drawBitmapMesh(bmp, mw, mh, verts, 0, null, 0, warpPaint) }
 }
 
 /** The aura keeps to the cool end of the iris with magenta, as in the reference. */

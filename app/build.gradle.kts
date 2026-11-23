@@ -38,6 +38,7 @@ android {
 
     buildTypes {
         release {
+            ndk { abiFilters.clear(); abiFilters += "arm64-v8a" }
             isMinifyEnabled = false
             if (keystore != null) signingConfig = signingConfigs.getByName("release")
         }
@@ -74,6 +75,19 @@ dependencies {
 
     // On-device text recognition; the model is bundled, so OCR works offline from the start.
     implementation("com.google.mlkit:text-recognition:16.0.1")
+    // Other writing systems: small, Play services downloads the model when first used.
+    implementation("com.google.android.gms:play-services-mlkit-text-recognition-chinese:16.0.2")
+    implementation("com.google.android.gms:play-services-mlkit-text-recognition-japanese:16.0.2")
+    implementation("com.google.android.gms:play-services-mlkit-text-recognition-korean:16.0.2")
+    implementation("com.google.android.gms:play-services-mlkit-text-recognition-devanagari:16.0.2")
+    // ASN stickers, separator sheets and payment QR codes.
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    // Document detection, perspective correction and scan clean-up.
+    implementation("org.opencv:opencv:4.13.0")
+    // App lock.
+    implementation("androidx.biometric:biometric:1.1.0")
+    // Backup folder access.
+    implementation("androidx.documentfile:documentfile:1.1.0")
 
     val camerax = "1.4.2"
     implementation("androidx.camera:camera-core:$camerax")
@@ -97,6 +111,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.11.0")
 
     testImplementation("junit:junit:4.13.2")
+    // OpenCV's desktop build, so the document detector can run on real photos in unit tests.
+    testImplementation("org.openpnp:opencv:4.9.0-0")
 
     // Screenshot tests: render screens and frames of the scan animation on the JVM.
     testImplementation("org.robolectric:robolectric:4.18.1")

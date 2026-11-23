@@ -34,6 +34,8 @@ data class Extraction(
     val pageCount: Int? = null,
     /** Where the most important fields sit on the page, for the scan highlight animation. */
     val highlights: List<Box> = emptyList(),
+    /** Bank transfer details from a payment QR code. */
+    val payment: Payment? = null,
 ) {
     /** A short title in the style "Nordlit Coffee" or "Invoice 2024-118 · ACME GmbH". */
     fun suggestedTitle(): String? = when {
@@ -56,31 +58,31 @@ object ReceiptParser {
     private val numericDate = Regex("""\b(\d{1,4})([./-])(\d{1,2})\2(\d{2,4})\b""")
     private val monthNames: Map<String, Month> = buildMap {
         for (m in Month.entries) {
-            for (loc in listOf(Locale.ENGLISH, Locale.GERMAN)) {
+            for (loc in listOf(Locale.ENGLISH, Locale.GERMAN, Locale.FRENCH, Locale.ITALIAN, Locale.forLanguageTag("es"), Locale.forLanguageTag("nl"), Locale.forLanguageTag("pt"))) {
                 put(m.getDisplayName(TextStyle.FULL, loc).lowercase(), m)
                 put(m.getDisplayName(TextStyle.SHORT, loc).lowercase().trimEnd('.'), m)
             }
         }
-        put("mrz", Month.MARCH); put("sept", Month.SEPTEMBER)
+        put("mrz", Month.MARCH); put("sept", Month.SEPTEMBER); put("fevrier", Month.FEBRUARY); put("aout", Month.AUGUST); put("decembre", Month.DECEMBER)
     }
-    private val textDate1 = Regex("""\b(\d{1,2})\.?\s+([A-Za-zäÄ]{3,9})\.?\s+(\d{4})\b""") // 18 Nov 2026, 18. März 2026
+    private val textDate1 = Regex("""\b(\d{1,2})\.?\s+(?:de\s+)?([\p{L}]{3,10})\.?\s+(?:de\s+)?(\d{4})\b""") // 18 Nov 2026, 18. März 2026
     private val textDate2 = Regex("""\b([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})\b""") // Nov 18, 2026
 
-    private val totalWords = Regex("""(?i)\b(grand\s*total|total|amount\s*due|balance\s*due|summe|gesamt(?:betrag|summe)?|zu\s*zahlen|endbetrag|rechnungsbetrag|betrag)\b""")
-    private val notTotalWords = Regex("""(?i)(sub\s*-?\s*total|zwischensumme|total\s*(tax|vat|items|savings|discount)|netto)""")
-    private val subtotalWords = Regex("""(?i)\b(sub\s*-?\s*total|zwischensumme|netto(?:betrag)?|net\s*amount)\b""")
-    private val taxWords = Regex("""(?i)\b(tax|vat|mwst|ust|gst|hst|steuer)\b\.?\s*(\d{1,2}(?:[.,]\d+)?\s?%)?""")
+    private val totalWords = Regex("""(?i)\b(grand\s*total|total(?:\s*ttc)?|amount\s*due|balance\s*due|summe|gesamt(?:betrag|summe)?|zu\s*zahlen|endbetrag|rechnungsbetrag|betrag|montant|net\s*à\s*payer|à\s*payer|importe|total\s*a\s*pagar|totale|da\s*pagare|totaal|te\s*betalen|bedrag|summa)\b""")
+    private val notTotalWords = Regex("""(?i)(sub\s*-?\s*total|sous-total|subtotale|subtotaal|zwischensumme|total\s*(tax|vat|items|savings|discount|ht|tva|iva)|netto|base\s*imponible|imponibile)""")
+    private val subtotalWords = Regex("""(?i)\b(sub\s*-?\s*total|sous-total|subtotale|subtotaal|total\s*ht|zwischensumme|netto(?:betrag)?|net\s*amount|base\s*imponible|imponibile)\b""")
+    private val taxWords = Regex("""(?i)\b(tax|vat|mwst|ust|gst|hst|steuer|tva|iva|btw|moms|mva)\b\.?\s*(\d{1,2}(?:[.,]\d+)?\s?%)?""")
     private val nonItemWords = Regex("""(?i)\b(total|summe|gesamt|tax|vat|mwst|ust|change|rückgeld|cash|bar|visa|mastercard|amex|maestro|girocard|card|karte|tip|trinkgeld|auth|balance|zu zahlen|gegeben|subtotal|zwischensumme|netto|brutto|ec)\b""")
     private val cardRe = Regex("""(?i)\b(visa|mastercard|master\s*card|amex|american express|maestro|girocard|discover|ec[- ]?karte|debit|credit)\b.*?(?:[*xX•·.]{2,}\s*)(\d{4})""")
     private val authRe = Regex("""(?i)\b(?:auth(?:orization|orisation)?|genehmigung|approval)(?:\s*(?:code|no|nr|#))?\s*[:#.]?\s*([A-Z0-9]{4,10})\b""")
-    private val orderRe = Regex("""(?i)\b(?:order|bestellung|bon|beleg|receipt|ticket|transaction|trans)\s*(?:no\.?|nr\.?|number|#)?\s*[:#]?\s*#?\s*([A-Z0-9-]{2,})""")
-    private val invoiceRe = Regex("""(?i)\b(?:invoice|rechnung)\s*(?:no\.?|nr\.?|number|nummer|#)?\s*[:#.]?\s*([A-Z0-9][A-Z0-9/_-]{2,})""")
+    private val orderRe = Regex("""(?i)\b(?:order|bestellung|bon|beleg|receipt|ticket|transaction|trans|commande|pedido|ordine|bestelling)\s*(?:no\.?|nr\.?|number|#)?\s*[:#]?\s*#?\s*([A-Z0-9-]{2,})""")
+    private val invoiceRe = Regex("""(?i)\b(?:invoice|rechnung|facture|factura|fattura|factuur)\s*(?:no\.?|nr\.?|n[°º]\.?|number|nummer|núm\.?|num\.?|#)?\s*[:#.]?\s*([A-Z0-9][A-Z0-9/_-]{2,})""")
     private val tableRe = Regex("""(?i)\b(?:table|tisch)\s*#?\s*(\d{1,3})\b""")
     private val phoneRe = Regex("""(?i)\b(?:tel|phone|fon|telefon)\.?\s*[:.]?\s*([+\d][\d /().-]{5,})""")
-    private val pageRe = Regex("""(?i)\b(?:page|seite|blatt|pg\.?|s\.)\s*(\d{1,3})\s*(?:of|von|/|aus)\s*(\d{1,3})\b""")
+    private val pageRe = Regex("""(?i)\b(?:page|seite|blatt|pg\.?|s\.|página|pagina|pag\.)\s*(\d{1,3})\s*(?:of|von|/|aus|sur|de|di|van)\s*(\d{1,3})\b""")
     private val pageShortRe = Regex("""^\s*-?\s*(\d{1,2})\s*/\s*(\d{1,2})\s*-?\s*$""")
-    private val invoiceWords = Regex("""(?i)\b(invoice|rechnung|bill to|rechnungsempfänger|due date|fällig|iban|ust-?id|vat id|zahlungsziel)\b""")
-    private val receiptWords = Regex("""(?i)\b(thank you|vielen dank|danke|cashier|kasse|table|tisch|receipt|bon|beleg|change|rückgeld|tip|trinkgeld)\b""")
+    private val invoiceWords = Regex("""(?i)\b(invoice|rechnung|bill to|rechnungsempfänger|due date|fällig|iban|ust-?id|vat id|zahlungsziel|facture|factura|fattura|factuur|échéance|vencimiento|scadenza|vervaldatum|n° tva|partita iva|nif|cif)\b""")
+    private val receiptWords = Regex("""(?i)\b(thank you|vielen dank|danke|cashier|kasse|table|tisch|receipt|bon|beleg|change|rückgeld|tip|trinkgeld|merci|ticket|caisse|gracias|caja|grazie|cassa|scontrino|bedankt|kassa|bonnetje|obrigado)\b""")
 
     fun parse(ocr: OcrResult, defaultLocale: Locale = Locale.getDefault()): Extraction {
         val rows = ocr.rows()
@@ -109,20 +111,27 @@ object ReceiptParser {
             }
         }
 
-        // Merchant: the first strong line near the top that is not a date, number or address.
+        // Merchant: the first short, name-like line near the top; failing that, the page's heading.
         var merchant: String? = null
         var merchantRow = -1
-        val headerLimit = if (dateRow > 0) dateRow else minOf(rows.size, 6)
-        for (i in 0 until minOf(headerLimit, 6)) {
+        val headerLimit = if (dateRow > 0) dateRow else minOf(rows.size, 8)
+        for (i in 0 until minOf(headerLimit, 8)) {
             val t = rows[i].text.trim()
             val letters = t.count { it.isLetter() }
             if (letters < 3 || letters < t.length / 2) continue
             if (phoneRe.containsMatchIn(t) || invoiceWords.containsMatchIn(t) && t.length < 12) continue
             if (Regex("""(?i)^(www\.|http)""").containsMatchIn(t)) continue
+            if (!Heading.plausible(t)) continue
             merchant = prettyName(t)
             merchantRow = i
             highlights.add(0, rows[i].box)
             break
+        }
+        if (merchant == null) {
+            Heading.pick(ocr)?.let { h ->
+                merchant = prettyName(h.text.trim())
+                highlights.add(0, h.box)
+            }
         }
         val address = if (merchantRow >= 0) {
             rows.drop(merchantRow + 1).take(2).map { it.text.trim() }
@@ -161,6 +170,7 @@ object ReceiptParser {
                             when (m.groupValues[1].lowercase()) {
                                 "vat" -> "VAT"; "gst" -> "GST"; "hst" -> "HST"
                                 "mwst" -> "MwSt"; "ust" -> "USt"; "steuer" -> "Steuer"
+                                "tva" -> "TVA"; "iva" -> "IVA"; "btw" -> "BTW"; "moms" -> "Moms"; "mva" -> "MVA"
                                 else -> "Tax"
                             }
                         )
@@ -228,7 +238,7 @@ object ReceiptParser {
             authCode = auth,
             pageNumber = page?.groupValues?.get(1)?.toIntOrNull(),
             pageCount = page?.groupValues?.get(2)?.toIntOrNull(),
-            highlights = highlights,
+            highlights = highlights.filter { b -> b.width <= ocr.width * 0.9f && b.height <= ocr.height * 0.1f && b.width * b.height <= ocr.width * ocr.height * 0.12f },
         )
     }
 
@@ -237,7 +247,7 @@ object ReceiptParser {
         text.contains('£') || Regex("""\bGBP\b""").containsMatchIn(text) -> "GBP"
         Regex("""\bCHF\b""").containsMatchIn(text) -> "CHF"
         text.contains('$') || Regex("""\bUSD\b""").containsMatchIn(text) -> "USD"
-        Regex("""(?i)\b(mwst|ust|summe|gesamt|zwischensumme)\b""").containsMatchIn(text) -> "EUR"
+        Regex("""(?i)\b(mwst|ust|summe|gesamt|zwischensumme|tva|ttc|iva|btw|totale|importe|totaal)\b""").containsMatchIn(text) -> "EUR"
         Regex("""(?i)\b(tax|tip)\b""").containsMatchIn(text) && locale.country in setOf("US", "") -> "USD"
         else -> null
     }

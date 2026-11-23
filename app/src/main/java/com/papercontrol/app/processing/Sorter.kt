@@ -75,7 +75,7 @@ object Sorter {
         }
 
         // What the page itself says.
-        if (correspondent == null && ex.merchant != null) {
+        if (correspondent == null && ex.merchant != null && com.papercontrol.app.core.Heading.plausible(ex.merchant) && ex.merchant.split(' ').size <= 5) {
             val m = Text.normalize(ex.merchant)
             val existing = labels[LabelKind.CORRESPONDENT].orEmpty().maxByOrNull { Text.partialRatio(Text.normalize(it.name), m) }
             correspondent = if (existing != null && Text.partialRatio(Text.normalize(existing.name), m) >= 88) Pick(existing.id, existing.name, "Name on the document")
@@ -89,7 +89,7 @@ object Sorter {
             labels[LabelKind.FOLDER].orEmpty().firstOrNull { it.name.equals(kindName + "s", true) }?.let { folder = Pick(it.id, it.name, "Folder for ${kindName.lowercase()}s") }
         }
 
-        var title = ex.suggestedTitle() ?: text.lineSequence().map { it.trim() }.firstOrNull { it.count(Char::isLetter) >= 4 }?.take(60) ?: "Scan ${LocalDate.now()}"
+        var title = ex.suggestedTitle() ?: titleFallback(text, ex)
         var created = ex.date
         var amount = ex.total
         var currency = ex.currency ?: cfg.defaultCurrency.ifBlank { null }
@@ -129,6 +129,16 @@ object Sorter {
         }
 
         return Sorting(title, correspondent, docType, folder, tags, created, amount, currency, usedAi)
+    }
+
+    private fun titleFallback(text: String, ex: Extraction): String {
+        val first = text.lineSequence().map { it.trim() }.firstOrNull { l -> l.count { it.isLetter() } >= 6 }
+        if (first != null) {
+            val words = first.split(Regex("\\s+"))
+            return words.take(6).joinToString(" ") + if (words.size > 6) "…" else ""
+        }
+        val k = when (ex.kind) { DocKind.RECEIPT -> "Receipt"; DocKind.INVOICE -> "Invoice"; DocKind.LETTER -> "Letter"; DocKind.OTHER -> "Document" }
+        return "$k ${ex.date ?: LocalDate.now()}"
     }
 
     /** Labels of [Pick]s that do not exist yet are created; returns their ids. */

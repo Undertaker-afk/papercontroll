@@ -1,15 +1,21 @@
 package com.papercontrol.app.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import android.os.SystemClock
+import android.view.WindowManager
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -29,8 +35,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import androidx.core.app.ActivityCompat
+import androidx.fragment.app.FragmentActivity
 import com.papercontrol.app.data.Filter
 import com.papercontrol.app.data.LabelKind
+import com.papercontrol.app.data.Settings
 import com.papercontrol.app.data.Store
 import com.papercontrol.app.processing.Importer
 import com.papercontrol.app.ui.scan.ScanFlow
@@ -48,6 +59,9 @@ sealed interface Route {
     data object Import : Route
     data class Labels(val kind: LabelKind) : Route
     data object Settings : Route
+    data object Trash : Route
+    data object Insights : Route
+    data object Ask : Route
 }
 
 enum class Tab { DOCUMENTS, FOLDERS, LABELS, SETTINGS }
@@ -61,18 +75,47 @@ class Nav(start: Route) {
     fun replace(r: Route) { stack[stack.lastIndex] = r }
 }
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     private var shared by mutableStateOf<List<Uri>>(emptyList())
+    private var openDoc by mutableStateOf<Long?>(null)
+    private var locked by mutableStateOf(false)
+    private var stoppedAt = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(SystemBarStyle.dark(android.graphics.Color.TRANSPARENT), SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
         super.onCreate(savedInstanceState)
-        shared = sharedUris(intent)
+        locked = Settings.current.appLock
+        handle(intent)
         setContent { PaperTheme { Root() } }
+        if (Build.VERSION.SDK_INT >= 33 && Settings.current.reminders &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        handle(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Lock again after a minute in the background.
+        if (Settings.current.appLock && stoppedAt > 0 && SystemClock.elapsedRealtime() - stoppedAt > 60_000) locked = true
+        applySecure()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        stoppedAt = SystemClock.elapsedRealtime()
+    }
+
+    fun applySecure() {
+        if (Settings.current.secureScreen || Settings.current.appLock) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    }
+
+    private fun handle(intent: Intent?) {
+        intent?.getLongExtra(EXTRA_DOC, -1L)?.takeIf { it > 0 }?.let { openDoc = it }
         shared = sharedUris(intent)
     }
 
@@ -88,10 +131,30 @@ class MainActivity : ComponentActivity() {
         else -> emptyList()
     }
 
+    /** Fingerprint, face or the phone's screen lock. */
+    fun unlock() {
+        val authenticators = BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        if (BiometricManager.from(this).canAuthenticate(authenticators) != BiometricManager.BIOMETRIC_SUCCESS) {
+            // No screen lock set up on this phone: nothing to check against.
+            locked = false
+            return
+        }
+        val prompt = BiometricPrompt(this, ContextCompat.getMainExecutor(this), object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) { locked = false }
+        })
+        prompt.authenticate(
+            BiometricPrompt.PromptInfo.Builder()
+                .setTitle("Unlock PaperControl")
+                .setAllowedAuthenticators(authenticators)
+                .build()
+        )
+    }
+
     @Composable
     private fun Root() {
         val nav = remember { Nav(Route.Home()) }
         val context = LocalContext.current
+        val cfg by Settings.flow.collectAsState()
 
         fun import(uris: List<Uri>) {
             @Suppress("OPT_IN_USAGE")
@@ -106,6 +169,11 @@ class MainActivity : ComponentActivity() {
                 import(uris)
             }
         }
+        LaunchedEffect(openDoc) {
+            openDoc?.let { id -> if (withContext(Dispatchers.IO) { Store.document(id) } != null) nav.push(Route.Doc(id)); openDoc = null }
+        }
+        LaunchedEffect(cfg.appLock, cfg.secureScreen) { applySecure() }
+        LaunchedEffect(locked) { if (locked) unlock() }
 
         BackHandler(enabled = nav.stack.size > 1 && nav.top !is Route.Scan) { nav.pop() }
 
@@ -126,27 +194,43 @@ class MainActivity : ComponentActivity() {
                         onScan = { nav.push(Route.Scan) },
                         onImport = ::import,
                         onLabels = { nav.push(Route.Labels(it)) },
+                        onGo = { nav.push(it) },
                     )
                     Route.Scan -> ScanFlow(
                         onClose = { nav.pop() },
                         onSaved = { id -> nav.replace(Route.Doc(id)) },
                         onImport = { uris -> nav.pop(); import(uris) },
+                        onOpen = { id -> nav.replace(Route.Doc(id)) },
                     )
-                    is Route.Doc -> DocumentScreen(route.id, onBack = { nav.pop() }, onOpen = { nav.replace(Route.Doc(it)) })
+                    is Route.Doc -> DocumentScreen(route.id, onBack = { nav.pop() }, onOpen = { nav.push(Route.Doc(it)) })
                     Route.Import -> ImportScreen(onDone = { nav.pop() })
                     is Route.Labels -> LabelsScreen(route.kind, onBack = { nav.pop() }, onKind = { nav.replace(Route.Labels(it)) })
                     Route.Settings -> SettingsScreen(onBack = { nav.pop() })
+                    Route.Trash -> TrashScreen(onBack = { nav.pop() }, onOpen = { nav.push(Route.Doc(it)) })
+                    Route.Insights -> InsightsScreen(onBack = { nav.pop() }, onOpen = { nav.push(Route.Doc(it)) }, onFilter = { nav.replace(Route.Home(it)) })
+                    Route.Ask -> AskScreen(onBack = { nav.pop() }, onOpen = { nav.push(Route.Doc(it)) })
                 }
             }
+            AnimatedVisibility(locked, enter = fadeIn(), exit = fadeOut()) { LockScreen(onUnlock = ::unlock) }
         }
+    }
+
+    companion object {
+        const val EXTRA_DOC = "doc"
     }
 }
 
 /** Reads from the store off the main thread and again whenever the archive changes. */
 @Composable
-fun <T> query(vararg keys: Any?, initial: T, block: () -> T): T {
+fun <T> query(vararg keys: Any?, initial: T, block: suspend () -> T): T {
     val version by Store.version.collectAsState()
     var value by remember(*keys) { mutableStateOf(initial) }
     LaunchedEffect(version, *keys) { value = withContext(Dispatchers.IO) { block() } }
     return value
+}
+
+/** Shares a file from the app's cache or files through the system share sheet. */
+fun shareFile(context: android.content.Context, file: java.io.File, mime: String, title: String) {
+    val uri = FileProvider.getUriForFile(context, context.packageName + ".files", file)
+    context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION), title))
 }

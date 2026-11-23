@@ -20,6 +20,8 @@ data class Proposal(
     val reasons: List<String>,
     val confidence: Double,
     val sorting: Sorting? = null,
+    /** Documents already in the archive that this one looks like. */
+    val duplicates: List<Duplicate> = emptyList(),
 )
 
 data class ImportState(
@@ -74,10 +76,16 @@ object Importer {
 
             _state.value = _state.value.copy(phase = "Mapping pages")
             val inputs = photos.mapIndexed { i, p -> PageInput(i, p.ocr, p.capturedAt, p.tone, p.extraction) }
-            var groups: List<PageGroup> = if (Settings.current.paperMapping) PaperMapper.group(inputs)
-            else inputs.map { PageGroup(listOf(it.key), 1.0, emptyList()) }
+            val separated = photos.any { it.codes.separator }
+            var groups: List<PageGroup> = when {
+                // Separator sheets decide exactly where documents start, as in Paperless-ngx.
+                separated -> splitAtSeparators(photos)
+                Settings.current.paperMapping -> PaperMapper.group(inputs)
+                else -> inputs.map { PageGroup(listOf(it.key), 1.0, emptyList()) }
+            }
+            photos.filter { it.codes.separator }.let { Consumer.discard(it) }
 
-            if (Settings.current.paperMapping && Llm.isReady(context)) {
+            if (!separated && Settings.current.paperMapping && Llm.isReady(context)) {
                 _state.value = _state.value.copy(phase = "Checking close calls with AI")
                 groups = settleWithAi(context, inputs, groups, photos)
             }
@@ -88,14 +96,30 @@ object Importer {
             _state.value = _state.value.copy(phase = "Sorting documents", done = 0, total = proposals.size, proposals = proposals)
             val sorted = proposals.mapIndexed { i, p ->
                 val s = runCatching { Consumer.sort(context, p.pages) }.getOrNull()
+                val dups = runCatching { Consumer.duplicates(p.pages, s) }.getOrDefault(emptyList())
                 _state.value = _state.value.copy(done = i + 1)
-                p.copy(sorting = s)
+                p.copy(sorting = s, duplicates = dups)
             }
             _state.value = ImportState(running = false, phase = "Ready", done = sorted.size, total = sorted.size, proposals = sorted)
         } catch (t: Throwable) {
             Log.w(TAG, "import failed", t)
             _state.value = _state.value.copy(running = false, error = t.message ?: t.javaClass.simpleName)
         }
+    }
+
+    /** Pages in capture order, cut at separator sheets; the sheets themselves are left out. */
+    private fun splitAtSeparators(photos: List<PreparedPage>): List<PageGroup> {
+        val order = photos.indices.sortedBy { photos[it].capturedAt }
+        val out = mutableListOf<PageGroup>()
+        var cur = mutableListOf<Int>()
+        for (i in order) {
+            if (photos[i].codes.separator) {
+                if (cur.isNotEmpty()) out += PageGroup(cur, 1.0, listOf("Separator sheet"))
+                cur = mutableListOf()
+            } else cur += i
+        }
+        if (cur.isNotEmpty()) out += PageGroup(cur, 1.0, listOf("Separator sheet"))
+        return out
     }
 
     private suspend fun settleWithAi(context: Context, inputs: List<PageInput>, groups: List<PageGroup>, photos: List<PreparedPage>): List<PageGroup> {

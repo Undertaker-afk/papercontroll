@@ -108,6 +108,10 @@ object Llm {
         }
     }
 
+    /** A free-form answer, for questions about the archive. */
+    suspend fun answer(context: Context, system: String, prompt: String): String =
+        ask(context, system, listOf(Content.Text(prompt)), maxTokens = 4096)
+
     fun parseSuggestion(reply: String): AiSuggestion? {
         val start = reply.indexOf('{')
         val end = reply.lastIndexOf('}')

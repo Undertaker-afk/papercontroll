@@ -60,25 +60,26 @@ class ScreenshotTest {
 
     private fun capture(): Capture {
         val photo = photo()
+        // OpenCV cannot load under Robolectric, so the plain detector and warp run here.
         val quad = Images.detect(photo)?.quad
         assertNotNull("paper should be found in the video frame", quad)
         val flat = Images.warp(photo, quad!!)
         val clean = Images.enhance(flat)
-        return Capture(photo, quad, flat, clean).apply {
-            // Field positions on the paper, as fractions of its size (merchant, date, time, total).
-            fun b(l: Float, t: Float, r: Float, bo: Float) = Box(l * clean.width, t * clean.height, r * clean.width, bo * clean.height)
-            highlights = listOf(b(0.10f, 0.058f, 0.86f, 0.098f), b(0.07f, 0.228f, 0.40f, 0.262f), b(0.71f, 0.226f, 0.88f, 0.258f), b(0.68f, 0.658f, 0.93f, 0.698f))
-        }
+        // Field positions on the paper, as fractions of its size (merchant, date, time, total).
+        fun b(l: Float, t: Float, r: Float, bo: Float) = Box(l * clean.width, t * clean.height, r * clean.width, bo * clean.height)
+        val highlights = listOf(b(0.10f, 0.058f, 0.86f, 0.098f), b(0.07f, 0.228f, 0.40f, 0.262f), b(0.71f, 0.226f, 0.88f, 0.258f), b(0.68f, 0.658f, 0.93f, 0.698f))
+        val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val dir = File(ctx.cacheDir, "shots").apply { mkdirs() }
+        val ex = ReceiptParser.parse(receiptOcr, java.util.Locale.US)
+        val page = PreparedPage(Images.save(clean, File(dir, "clean.jpg")), Images.save(photo, File(dir, "photo.jpg")), receiptOcr, ex, floatArrayOf(0.8f, 0.8f, 0.8f), 0)
+        return Capture(photo, quad, flat, clean, highlights, page)
     }
 
     private fun session(c: Capture): ScanSession {
         val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
         val s = ScanSession(ctx, CoroutineScope(Dispatchers.Unconfined))
-        val dir = File(ctx.cacheDir, "shots").apply { mkdirs() }
-        val file = Images.save(c.clean, File(dir, "clean.jpg"))
-        val original = Images.save(c.photo, File(dir, "photo.jpg"))
         val ex = ReceiptParser.parse(receiptOcr, java.util.Locale.US)
-        s.pages += PreparedPage(file, original, receiptOcr, ex, floatArrayOf(0.8f, 0.8f, 0.8f), 0)
+        s.pages += c.page
         s.extraction = ex
         s.capture = c
         s.stage = Stage.REVEAL
@@ -111,9 +112,9 @@ class ScreenshotTest {
             runBlocking { anim.block() }
             shoot(name)
         }
-        at("reveal_1_flash") { flash.snapTo(0.6f); photo.snapTo(1f) }
-        at("reveal_2_dark") { flash.snapTo(0f); photo.snapTo(0.25f) }
-        at("reveal_3_band_top") { photo.snapTo(0f); bandGlow.snapTo(1f); band.snapTo(0.06f) }
+        at("reveal_1_photo") { photo.snapTo(1f); peel.snapTo(0f) }
+        at("reveal_2_peel") { photo.snapTo(0.45f); peel.snapTo(0.5f) }
+        at("reveal_3_band_top") { photo.snapTo(0f); peel.snapTo(1f); bandGlow.snapTo(1f); band.snapTo(0.06f) }
         at("reveal_4_band_mid") { band.snapTo(0.45f) }
         at("reveal_5_band_low") { band.snapTo(0.8f) }
         at("reveal_6_scanned") { band.snapTo(1.12f); bandGlow.snapTo(0f) }

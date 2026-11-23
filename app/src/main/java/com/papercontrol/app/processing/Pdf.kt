@@ -33,12 +33,33 @@ object Pdf {
                 val page = pdf.startPage(PdfDocument.PageInfo.Builder(w, h, i + 1).create())
                 page.canvas.drawColor(Color.WHITE)
                 page.canvas.drawBitmap(bmp, null, Rect(0, 0, w, h), Paint(Paint.FILTER_BITMAP_FLAG))
+                com.papercontrol.app.ml.TextReader.fromJson(p.ocr)?.let { drawTextLayer(page.canvas, it, w) }
                 pdf.finishPage(page)
                 bmp.recycle()
             }
             pdf.writeTo(out)
         } finally {
             pdf.close()
+        }
+    }
+
+    /**
+     * The recognized text, drawn invisibly over each line, so the PDF can be searched and its
+     * text selected and copied in any PDF viewer (like Paperless-ngx's archive version).
+     */
+    private fun drawTextLayer(canvas: android.graphics.Canvas, ocr: com.papercontrol.app.core.OcrResult, pageWidth: Int) {
+        val s = pageWidth / ocr.width.toFloat()
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(1, 0, 0, 0) }
+        for (l in ocr.lines) {
+            val text = l.text.trim().ifEmpty { continue }
+            val bh = l.box.height * s
+            val bw = l.box.width * s
+            if (bh < 2f || bw < 2f) continue
+            paint.textSize = bh * 0.82f
+            paint.textScaleX = 1f
+            val measured = paint.measureText(text).coerceAtLeast(1f)
+            paint.textScaleX = (bw / measured).coerceIn(0.2f, 4f)
+            canvas.drawText(text, l.box.left * s, l.box.bottom * s - bh * 0.18f, paint)
         }
     }
 
@@ -80,10 +101,11 @@ object Pdf {
         var n = 0
         for (d in Store.documents(com.papercontrol.app.data.Filter(), Int.MAX_VALUE)) {
             val folder = d.folderId?.let { folders[it] } ?: "Unsorted"
+            val path = folder.split('/').joinToString("/") { safeName(it) }
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, safeName(d.title) + ".pdf")
                 put(MediaStore.Downloads.MIME_TYPE, "application/pdf")
-                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/PaperControl/" + safeName(folder))
+                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/PaperControl/" + path)
             }
             val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: continue
             context.contentResolver.openOutputStream(uri)?.use { write(d, it); n++ }

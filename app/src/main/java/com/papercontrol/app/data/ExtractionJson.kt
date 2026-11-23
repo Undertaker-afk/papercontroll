@@ -3,6 +3,7 @@ package com.papercontrol.app.data
 import com.papercontrol.app.core.DocKind
 import com.papercontrol.app.core.Extraction
 import com.papercontrol.app.core.LineItem
+import com.papercontrol.app.core.Payment
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.LocalDate
@@ -32,6 +33,13 @@ object ExtractionJson {
         e.cardLast4?.let { put("cardLast4", it) }
         e.authCode?.let { put("auth", it) }
         e.pageCount?.let { put("pageCount", it) }
+        e.payment?.let { pay ->
+            put("payment", JSONObject().apply {
+                put("iban", pay.iban); put("standard", pay.standard)
+                pay.name?.let { put("name", it) }; pay.amount?.let { put("amount", it) }; pay.currency?.let { put("currency", it) }
+                pay.reference?.let { put("reference", it) }; pay.message?.let { put("message", it) }; pay.bic?.let { put("bic", it) }
+            })
+        }
     }.toString()
 
     fun read(s: String): Extraction {
@@ -66,6 +74,14 @@ object ExtractionJson {
                 cardLast4 = str("cardLast4"),
                 authCode = str("auth"),
                 pageCount = if (o.has("pageCount")) o.getInt("pageCount") else null,
+                payment = o.optJSONObject("payment")?.let { p ->
+                    fun ps(k: String) = if (p.has(k)) p.getString(k) else null
+                    Payment(
+                        iban = p.getString("iban"), name = ps("name"), amount = if (p.has("amount")) p.getDouble("amount") else null,
+                        currency = ps("currency"), reference = ps("reference"), message = ps("message"), bic = ps("bic"),
+                        standard = p.optString("standard", "EPC"),
+                    )
+                },
             )
         } catch (_: Exception) {
             Extraction()
@@ -83,6 +99,7 @@ object ExtractionJson {
         f.to?.let { put("to", it.toString()) }
         put("sort", f.sort.name)
         put("desc", f.descending)
+        put("trash", f.trash)
     }.toString()
 
     fun readFilter(s: String): Filter = try {
@@ -99,6 +116,7 @@ object ExtractionJson {
             to = if (o.has("to")) LocalDate.parse(o.getString("to")) else null,
             sort = runCatching { SortBy.valueOf(o.optString("sort")) }.getOrDefault(SortBy.ADDED),
             descending = o.optBoolean("desc", true),
+            trash = o.optBoolean("trash"),
         )
     } catch (_: Exception) {
         Filter()

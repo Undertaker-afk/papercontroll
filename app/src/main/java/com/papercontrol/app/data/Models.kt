@@ -44,8 +44,16 @@ data class Document(
     val pageCount: Int = 0,
     val thumbPath: String? = null,
     val tagIds: List<Long> = emptyList(),
-    /** Id on the Paperless-ngx server after upload. */
+    /** Upload task on the Paperless-ngx server, until the server reports the document id. */
     val remoteTask: String? = null,
+    /** Document id on the Paperless-ngx server, once uploaded or downloaded. */
+    val remoteId: Long? = null,
+    /** When it was moved to the trash; null while it is in the archive. */
+    val deletedAt: Long? = null,
+    /** Difference hash of the first page, for duplicate detection. */
+    val pageHash: Long? = null,
+    /** Set when this looked like a copy of another document when it was added. */
+    val duplicateOf: Long? = null,
 )
 
 data class Page(
@@ -58,11 +66,29 @@ data class Page(
     val originalPath: String?,
     val text: String,
     val capturedAt: Long,
+    /** Recognized lines with their positions (JSON), for the PDF text layer. */
+    val ocr: String = "",
 )
 
-enum class FieldType(val title: String) { TEXT("Text"), NUMBER("Number"), MONETARY("Amount"), DATE("Date"), BOOLEAN("Yes / no"), URL("Link") }
+enum class FieldType(val title: String) {
+    TEXT("Text"), NUMBER("Number"), MONETARY("Amount"), DATE("Date"), BOOLEAN("Yes / no"), URL("Link"),
+    SELECT("Choice"), DOCLINK("Document link"),
+}
 
-data class CustomField(val id: Long = 0, val name: String, val type: FieldType)
+/** [options]: the choices of a SELECT field. */
+data class CustomField(val id: Long = 0, val name: String, val type: FieldType, val options: List<String> = emptyList())
+
+data class Reminder(
+    val id: Long = 0,
+    val docId: Long,
+    val date: LocalDate,
+    val kind: com.papercontrol.app.core.DeadlineKind,
+    val note: String = "",
+    val done: Boolean = false,
+    /** Days-before values already notified, so each reminder fires once per step. */
+    val notified: Set<Int> = emptySet(),
+    val docTitle: String = "",
+)
 
 data class FieldValue(val field: CustomField, val value: String)
 
@@ -82,6 +108,8 @@ data class Filter(
     val to: LocalDate? = null,
     val sort: SortBy = SortBy.ADDED,
     val descending: Boolean = true,
+    /** Show the trash instead of the archive. */
+    val trash: Boolean = false,
 ) {
     val isEmpty get() = query.isBlank() && tagIds.isEmpty() && correspondentId == null && docTypeId == null && folderId == null && !inboxOnly && from == null && to == null
 }

@@ -22,6 +22,9 @@ object Images {
     /** Longest side of stored scans: sharp enough to read and print, small enough to keep many. */
     const val MAX_SIDE = 2400
 
+    /** Longest side of a camera capture kept for finding and reading the page. */
+    const val CAPTURE_SIDE = 3200
+
     fun decode(context: Context, uri: Uri, maxSide: Int = MAX_SIDE): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) } ?: return null
@@ -81,15 +84,26 @@ object Images {
         return Triple(lum, w, h)
     }
 
-    fun detect(bmp: Bitmap): QuadDetector.Result? {
+    /** Finds the page: OpenCV when available, the plain detector otherwise. */
+    fun detect(bmp: Bitmap, thorough: Boolean = true): com.papercontrol.app.vision.Detection? =
+        com.papercontrol.app.vision.Cv.detect(bmp, thorough) ?: if (com.papercontrol.app.vision.Cv.ready()) null
+        else detectPlain(bmp)?.let { com.papercontrol.app.vision.Detection(it.quad, it.confidence, com.papercontrol.app.vision.Found.BRIGHT) }
+
+    fun warp(src: Bitmap, quad: Quad, maxSide: Int = MAX_SIDE): Bitmap = com.papercontrol.app.vision.Cv.warp(src, quad, maxSide)
+
+    /** Scanner-style clean-up: lighting evened out, paper white, print dark, colours kept. */
+    fun enhance(src: Bitmap): Bitmap = com.papercontrol.app.vision.Cv.scanClean(src)
+
+    /** Plain-Kotlin fallback detector, used only when OpenCV cannot load. */
+    fun detectPlain(bmp: Bitmap): QuadDetector.Result? {
         val (lum, w, h) = luma(bmp)
         return QuadDetector.detect(lum, w, h)
     }
 
     /** Flattens the document inside [quad] into an upright rectangle. */
-    fun warp(src: Bitmap, quad: Quad): Bitmap {
+    fun warpPlain(src: Bitmap, quad: Quad, maxSide: Int = MAX_SIDE): Bitmap {
         val (w, h) = quad.flatSize(src.width, src.height)
-        val scale = min(1f, MAX_SIDE.toFloat() / max(w, h))
+        val scale = min(1f, maxSide.toFloat() / max(w, h))
         val ow = (w * scale).roundToInt().coerceAtLeast(1)
         val oh = (h * scale).roundToInt().coerceAtLeast(1)
         val from = quad.points.flatMap { listOf(it.x * src.width, it.y * src.height) }.toFloatArray()
@@ -118,7 +132,7 @@ object Images {
      * Makes a photo look like a scan: the paper is lifted to white (per channel, which also
      * removes color casts) and contrast is raised so print gets crisp and dark.
      */
-    fun enhance(src: Bitmap): Bitmap {
+    fun enhancePlain(src: Bitmap): Bitmap {
         val tone = paperTone(src)
         val contrast = 1.35f
         val cm = ColorMatrix()
@@ -139,6 +153,27 @@ object Images {
         cm.postConcat(con)
         val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
         Canvas(out).drawBitmap(src, 0f, 0f, Paint().apply { colorFilter = ColorMatrixColorFilter(cm) })
+        return out
+    }
+
+    /** 64-bit difference hash of a page, see [com.papercontrol.app.core.Similarity.dHash]. */
+    fun pageHash(bmp: Bitmap): Long {
+        val small = Bitmap.createScaledBitmap(bmp, 9, 8, true)
+        val px = IntArray(72)
+        small.getPixels(px, 0, 9, 0, 0, 9, 8)
+        return com.papercontrol.app.core.Similarity.dHash(IntArray(72) { i ->
+            val c = px[i]
+            ((c shr 16 and 0xFF) * 77 + (c shr 8 and 0xFF) * 150 + (c and 0xFF) * 29) shr 8
+        })
+    }
+
+    /** Rotates an image file by [degrees] into a new file next to it (a new name, so cached thumbnails refresh). */
+    fun rotateFile(path: String, degrees: Int): File? {
+        val src = File(path)
+        val bmp = BitmapFactory.decodeFile(path) ?: return null
+        val out = File(src.parentFile, src.nameWithoutExtension.substringBefore("~") + "~" + System.currentTimeMillis() % 100000 + ".jpg")
+        save(rotate(bmp, degrees), out, 90)
+        src.delete()
         return out
     }
 

@@ -11,3 +11,6 @@ captures/
 *.keystore
 *.jks
 *.litertlm
+
+# Personal test photos, kept out of the repository
+app/src/test/resources/private/

@@ -19,11 +19,39 @@ data class Box(val left: Float, val top: Float, val right: Float, val bottom: Fl
 }
 
 /** A piece of recognized text: one line as the recognizer reports it, or a word inside one. */
-data class OcrLine(val text: String, val box: Box, val words: List<OcrLine> = emptyList())
+data class OcrLine(
+    val text: String,
+    val box: Box,
+    val words: List<OcrLine> = emptyList(),
+    /** Direction the text runs, in degrees clockwise from left-to-right (90 = reads downward). */
+    val angle: Float = 0f,
+    val confidence: Float = 1f,
+)
 
 /** Text recognized on one page image of [width] x [height] pixels. */
 data class OcrResult(val lines: List<OcrLine>, val width: Int, val height: Int) {
     val text: String get() = rows().joinToString("\n") { it.text }
+
+    /** Characters recognized, ignoring spaces: how much was read. */
+    val chars: Int get() = lines.sumOf { l -> l.text.count { !it.isWhitespace() } }
+
+    /**
+     * How many clockwise quarter turns make the text upright (0 to 3). Decided by the lines'
+     * directions, weighted by length, so a few odd lines do not decide it.
+     */
+    fun uprightTurns(): Int {
+        val votes = IntArray(4)
+        for (l in lines) {
+            val n = l.text.count { it.isLetterOrDigit() }
+            if (n < 2) continue
+            val a = ((l.angle % 360f) + 360f) % 360f
+            // Text reading at +90 needs a quarter turn back (counter-clockwise) = 3 clockwise turns.
+            val quarter = ((a + 45f) / 90f).toInt() % 4
+            votes[(4 - quarter) % 4] += n
+        }
+        val best = votes.indices.maxByOrNull { votes[it] } ?: 0
+        return if (votes[best] == 0) 0 else best
+    }
 
     /**
      * Lines that sit on the same visual row, left to right. Receipts print the label on the

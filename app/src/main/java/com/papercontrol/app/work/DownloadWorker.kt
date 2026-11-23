@@ -32,10 +32,13 @@ data class DownloadProgress(val running: Boolean = false, val bytes: Long = 0, v
 /** Downloads the optional chat model, resuming where it stopped, with a progress notification. */
 class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
+    private val embed get() = inputData.getString("kind") == KIND_EMBED
+    private val progress get() = if (embed) embedProgress else chatProgress
+
     override suspend fun doWork(): Result {
         val ctx = applicationContext
         Settings.init(ctx)
-        val spec = ModelCatalog.resolve(Settings.current) ?: return fail("Enter a download link for your model first.")
+        val spec = (if (embed) ModelCatalog.embedding else ModelCatalog.resolve(Settings.current)) ?: return fail("Enter a download link for your model first.")
         if (spec.isReady(ctx)) { progress.value = DownloadProgress(); return Result.success() }
         createChannel(ctx)
         return try {
@@ -46,6 +49,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
             if (!spec.partFile(ctx).renameTo(target)) throw IOException("could not store the model file")
             spec.markReady(ctx)
             progress.value = DownloadProgress()
+            if (embed) IndexWorker.start(ctx)
             Result.success()
         } catch (e: IOException) {
             Log.w(TAG, "download interrupted", e)
@@ -110,13 +114,14 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
     private fun foreground(bytes: Long, total: Long): ForegroundInfo {
         val n = NotificationCompat.Builder(applicationContext, CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_scan)
-            .setContentTitle("Downloading AI model")
+            .setContentTitle(if (embed) "Downloading search model" else "Downloading AI model")
             .setContentText(if (total > 0) "${bytes / 1_000_000} of ${total / 1_000_000} MB" else "${bytes / 1_000_000} MB")
             .setProgress(if (total > 0) 1000 else 0, if (total > 0) (bytes * 1000 / total).toInt() else 0, total <= 0)
             .setOngoing(true)
             .addAction(0, "Cancel", WorkManager.getInstance(applicationContext).createCancelPendingIntent(id))
             .build()
-        return if (Build.VERSION.SDK_INT >= 29) ForegroundInfo(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) else ForegroundInfo(NOTIFICATION_ID, n)
+        val nid = NOTIFICATION_ID + if (embed) 1 else 0
+        return if (Build.VERSION.SDK_INT >= 29) ForegroundInfo(nid, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) else ForegroundInfo(nid, n)
     }
 
     private fun open(url: String, offset: Long): HttpURLConnection {
@@ -135,19 +140,24 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
         private const val CHANNEL = "downloads"
         private const val NOTIFICATION_ID = 41
         private const val WORK = "model-download"
-        val progress = MutableStateFlow(DownloadProgress())
+        const val KIND_EMBED = "embed"
+        val chatProgress = MutableStateFlow(DownloadProgress())
+        val embedProgress = MutableStateFlow(DownloadProgress())
+        /** The chat model download. */
+        val progress get() = chatProgress
 
-        fun start(context: Context) {
+        fun start(context: Context, embedding: Boolean = false) {
             val req = OneTimeWorkRequestBuilder<DownloadWorker>()
+                .setInputData(androidx.work.workDataOf("kind" to if (embedding) KIND_EMBED else "chat"))
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(if (Settings.current.wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED).build())
                 .build()
-            progress.value = DownloadProgress(running = true)
-            WorkManager.getInstance(context).enqueueUniqueWork(WORK, ExistingWorkPolicy.KEEP, req)
+            (if (embedding) embedProgress else chatProgress).value = DownloadProgress(running = true)
+            WorkManager.getInstance(context).enqueueUniqueWork(if (embedding) "$WORK-embed" else WORK, ExistingWorkPolicy.KEEP, req)
         }
 
-        fun cancel(context: Context) {
-            WorkManager.getInstance(context).cancelUniqueWork(WORK)
-            progress.value = DownloadProgress()
+        fun cancel(context: Context, embedding: Boolean = false) {
+            WorkManager.getInstance(context).cancelUniqueWork(if (embedding) "$WORK-embed" else WORK)
+            (if (embedding) embedProgress else chatProgress).value = DownloadProgress()
         }
 
         private fun createChannel(context: Context) {

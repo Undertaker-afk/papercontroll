@@ -26,6 +26,26 @@ data class Config(
     val paperlessToken: String = "",
     val paperlessAutoUpload: Boolean = false,
     val defaultCurrency: String = "",
+    /** Paperless-style title template; empty keeps the title read from the document. */
+    val titleTemplate: String = "",
+    /** Folder template, e.g. "{document_type}s/{correspondent}"; empty keeps the sorted folder. */
+    val folderTemplate: String = "",
+    val asnPrefix: String = com.papercontrol.app.core.Barcodes.DEFAULT_ASN_PREFIX,
+    val separatorBarcode: String = com.papercontrol.app.core.Barcodes.DEFAULT_SEPARATOR,
+    /** Extra writing systems for text recognition, besides Latin: chinese, devanagari, japanese, korean. */
+    val ocrScripts: Set<String> = emptySet(),
+    /** Search by meaning with the on-device embedding model. */
+    val semanticSearch: Boolean = false,
+    val appLock: Boolean = false,
+    /** Hide the app content in the recent-apps view and block screenshots. */
+    val secureScreen: Boolean = false,
+    val reminders: Boolean = true,
+    /** Folder (document tree URI) for automatic weekly backups; empty when off. */
+    val backupUri: String = "",
+    val lastBackup: Long = 0,
+    /** Two-way sync with the Paperless-ngx server (download as well as upload). */
+    val paperlessSync: Boolean = false,
+    val lastSync: Long = 0,
 ) {
     companion object {
         const val BACKEND_CPU = "cpu"
@@ -63,6 +83,19 @@ object Settings {
             paperlessToken = prefs.getString("paperlessToken", d.paperlessToken)!!,
             paperlessAutoUpload = prefs.getBoolean("paperlessAutoUpload", d.paperlessAutoUpload),
             defaultCurrency = prefs.getString("defaultCurrency", d.defaultCurrency)!!,
+            titleTemplate = prefs.getString("titleTemplate", d.titleTemplate)!!,
+            folderTemplate = prefs.getString("folderTemplate", d.folderTemplate)!!,
+            asnPrefix = prefs.getString("asnPrefix", d.asnPrefix)!!,
+            separatorBarcode = prefs.getString("separatorBarcode", d.separatorBarcode)!!,
+            ocrScripts = prefs.getStringSet("ocrScripts", d.ocrScripts)!!.toSet(),
+            semanticSearch = prefs.getBoolean("semanticSearch", d.semanticSearch),
+            appLock = prefs.getBoolean("appLock", d.appLock),
+            secureScreen = prefs.getBoolean("secureScreen", d.secureScreen),
+            reminders = prefs.getBoolean("reminders", d.reminders),
+            backupUri = prefs.getString("backupUri", d.backupUri)!!,
+            lastBackup = prefs.getLong("lastBackup", d.lastBackup),
+            paperlessSync = prefs.getBoolean("paperlessSync", d.paperlessSync),
+            lastSync = prefs.getLong("lastSync", d.lastSync),
         )
     }
 
@@ -84,6 +117,19 @@ object Settings {
             .putString("paperlessToken", c.paperlessToken.trim())
             .putBoolean("paperlessAutoUpload", c.paperlessAutoUpload)
             .putString("defaultCurrency", c.defaultCurrency)
+            .putString("titleTemplate", c.titleTemplate)
+            .putString("folderTemplate", c.folderTemplate)
+            .putString("asnPrefix", c.asnPrefix)
+            .putString("separatorBarcode", c.separatorBarcode)
+            .putStringSet("ocrScripts", c.ocrScripts)
+            .putBoolean("semanticSearch", c.semanticSearch)
+            .putBoolean("appLock", c.appLock)
+            .putBoolean("secureScreen", c.secureScreen)
+            .putBoolean("reminders", c.reminders)
+            .putString("backupUri", c.backupUri)
+            .putLong("lastBackup", c.lastBackup)
+            .putBoolean("paperlessSync", c.paperlessSync)
+            .putLong("lastSync", c.lastSync)
             .apply()
         _flow.value = c.copy(paperlessUrl = c.paperlessUrl.trim().trimEnd('/'), paperlessToken = c.paperlessToken.trim())
     }

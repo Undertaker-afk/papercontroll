@@ -1,6 +1,28 @@
 package com.papercontrol.app.ui
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.outlined.CallMerge
+import androidx.compose.material.icons.outlined.Category
+import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.ui.unit.sp
+import com.papercontrol.app.core.QuerySyntax
+import com.papercontrol.app.data.Reminder
+import com.papercontrol.app.data.Settings
+import com.papercontrol.app.processing.Search
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -94,13 +116,14 @@ fun HomeScreen(
     onScan: () -> Unit,
     onImport: (List<Uri>) -> Unit,
     onLabels: (LabelKind) -> Unit,
+    onGo: (Route) -> Unit = {},
 ) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> if (uris.isNotEmpty()) onImport(uris) }
     val importAction = { picker.launch(arrayOf("image/*", "application/pdf")) }
     Box(Modifier.fillMaxSize().background(Ink.Black)) {
         AnimatedContent(route.tab, transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(150)) }, label = "tab") { tab ->
             when (tab) {
-                Tab.DOCUMENTS -> DocumentsTab(route.filter, { onRoute(route.copy(filter = it)) }, onOpen, importAction)
+                Tab.DOCUMENTS -> DocumentsTab(route.filter, { onRoute(route.copy(filter = it)) }, onOpen, importAction, onGo)
                 Tab.FOLDERS -> FoldersTab { onRoute(Route.Home(Filter(folderId = it), Tab.DOCUMENTS)) }
                 Tab.LABELS -> LabelsHub(onLabels) { onRoute(Route.Home(it, Tab.DOCUMENTS)) }
                 Tab.SETTINGS -> SettingsContent(Modifier.statusBarsPadding())
@@ -145,26 +168,57 @@ private fun NavItem(icon: ImageVector, label: String, selected: Boolean, modifie
 }
 
 @Composable
-private fun DocumentsTab(filter: Filter, onFilter: (Filter) -> Unit, onOpen: (Long) -> Unit, onImport: () -> Unit) {
-    val docs = query(filter, initial = emptyList<Document>()) { Store.documents(filter) }
+private fun DocumentsTab(filter: Filter, onFilter: (Filter) -> Unit, onOpen: (Long) -> Unit, onImport: () -> Unit, onGo: (Route) -> Unit) {
+    val context = LocalContext.current
+    val cfg by Settings.flow.collectAsState()
+    val semantic = cfg.semanticSearch
+    val docs = query(filter, semantic, initial = emptyList<Document>()) { Search.documents(context, filter, semantic) }
     val labels = query(initial = emptyMap<Long, Label>()) { Store.allLabels() }
     val inbox = query(initial = 0) { Store.count(inboxOnly = true) }
+    val trash = query(initial = 0) { Store.trashCount() }
     val views = query(initial = emptyList<SavedView>()) { Store.savedViews() }
+    val upcoming = query(initial = emptyList<Reminder>()) { Store.reminders(openOnly = true, until = LocalDate.now().plusDays(14)) }
     var sortMenu by remember { mutableStateOf(false) }
+    val selected = remember { mutableStateListOf<Long>() }
+    var bulk by remember { mutableStateOf<LabelKind?>(null) }
     val scope = rememberCoroutineScope()
     val month = remember(docs) {
         val now = LocalDate.now()
         docs.filter { it.amount != null && it.created?.let { d -> d.year == now.year && d.month == now.month } == true }
     }
+    LaunchedEffect(filter) { selected.clear() }
+    BackHandler(enabled = selected.isNotEmpty()) { selected.clear() }
+    fun toggle(id: Long) { if (id in selected) selected.remove(id) else selected.add(id) }
+    fun token(t: String) = onFilter(filter.copy(query = if (filter.query.contains(t)) filter.query.replace(t, "").trim() else (filter.query + " " + t).trim()))
 
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 120.dp)) {
         item {
             Column(Modifier.statusBarsPadding().padding(horizontal = Metrics.Gutter)) {
-                Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (selected.isNotEmpty()) {
+                    SelectionBar(
+                        count = selected.size,
+                        onClose = { selected.clear() },
+                        onAll = { selected.clear(); selected.addAll(docs.map { it.id }) },
+                        onKind = { bulk = it },
+                        onMerge = if (selected.size > 1) ({
+                            val ids = selected.toList()
+                            scope.launch(Dispatchers.IO) { Store.mergeDocuments(ids.last(), ids.dropLast(1).reversed()) }
+                            selected.clear()
+                        }) else null,
+                        onTrash = {
+                            val ids = selected.toList()
+                            scope.launch(Dispatchers.IO) { Store.trash(ids) }
+                            selected.clear()
+                            Toast.makeText(context, "Moved ${ids.size} to the trash", Toast.LENGTH_SHORT).show()
+                        },
+                    )
+                } else Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(titleFor(filter, labels), style = Type.LargeTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text("${docs.size} document${if (docs.size == 1) "" else "s"}", style = Type.Caption)
                     }
+                    CircleButton(Icons.Default.AutoAwesome, "Ask your documents", { onGo(Route.Ask) })
+                    Spacer(Modifier.width(8.dp))
                     CircleButton(Icons.Outlined.UploadFile, "Import", onImport)
                     Spacer(Modifier.width(8.dp))
                     Box {
@@ -180,31 +234,47 @@ private fun DocumentsTab(filter: Filter, onFilter: (Filter) -> Unit, onOpen: (Lo
                     }
                 }
                 Spacer(Modifier.height(16.dp))
-                SearchField(filter.query, { onFilter(filter.copy(query = it)) }, "Search, or tag:… from:… type:…")
+                SearchField(filter.query, { onFilter(filter.copy(query = it)) }, if (semantic) "Search by meaning, or tag:… from:…" else "Search, or tag:… from:… created:…")
                 Spacer(Modifier.height(12.dp))
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     LabelChip("Inbox · $inbox", Ink.Iris[2], selected = filter.inboxOnly) { onFilter(filter.copy(inboxOnly = !filter.inboxOnly)) }
+                    LabelChip("Due", Ink.Danger, selected = filter.query.contains("is:due")) { token("is:due") }
+                    LabelChip("This month", Ink.Iris[4], selected = filter.query.contains("created:this-month")) { token("created:this-month") }
                     filter.folderId?.let { id -> ActiveChip("Folder · " + (labels[id]?.name ?: "?")) { onFilter(filter.copy(folderId = null)) } }
                     filter.correspondentId?.let { id -> ActiveChip(labels[id]?.name ?: "?") { onFilter(filter.copy(correspondentId = null)) } }
                     filter.docTypeId?.let { id -> ActiveChip(labels[id]?.name ?: "?") { onFilter(filter.copy(docTypeId = null)) } }
                     filter.tagIds.forEach { id -> ActiveChip("#" + (labels[id]?.name ?: "?")) { onFilter(filter.copy(tagIds = filter.tagIds - id)) } }
+                    if (filter.from != null || filter.to != null) ActiveChip(listOfNotNull(filter.from?.let { Fmt.date(it) }, filter.to?.let { Fmt.date(it) }).joinToString(" – ")) { onFilter(filter.copy(from = null, to = null)) }
                     views.forEach { v -> LabelChip(v.name, Ink.Secondary, selected = v.filter == filter) { onFilter(v.filter) } }
                     if (!filter.isEmpty && views.none { it.filter == filter }) {
                         PillButton("Save view", {
                             scope.launch(Dispatchers.IO) { Store.saveView(SavedView(name = titleFor(filter, labels), filter = filter)) }
                         }, icon = Icons.Outlined.BookmarkAdd)
                     }
+                    if (trash > 0) LabelChip("Trash · $trash", Ink.Tertiary) { onGo(Route.Trash) }
                 }
-                if (month.isNotEmpty() && filter.isEmpty) {
+                if (semantic && filter.query.isNotBlank()) Text("Results by meaning included", style = Type.Caption, modifier = Modifier.padding(top = 8.dp, start = 4.dp))
+                if (filter.isEmpty && upcoming.isNotEmpty()) {
                     Spacer(Modifier.height(16.dp))
-                    SpendCard(month)
+                    PaperCard(padding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)) {
+                        Text("Coming up", style = Type.Caption, modifier = Modifier.padding(top = 8.dp))
+                        upcoming.take(3).forEachIndexed { i, r ->
+                            if (i > 0) HairLine()
+                            ReminderRow(r) { onOpen(r.docId) }
+                        }
+                    }
+                }
+                if (filter.isEmpty) {
+                    Spacer(Modifier.height(12.dp))
+                    SpendCard(month) { onGo(Route.Insights) }
                 }
             }
         }
         if (docs.isEmpty()) {
             item { EmptyState(filter.isEmpty) }
         }
-        val groups = docs.groupBy { d ->
+        val relevance = semantic && QuerySyntax.parse(filter.query).text.isNotBlank()
+        val groups = if (relevance) mapOf("Best matches" to docs) else docs.groupBy { d ->
             val date = if (filter.sort == SortBy.ADDED) java.time.Instant.ofEpochMilli(d.addedAt).atZone(java.time.ZoneId.systemDefault()).toLocalDate() else d.created
             date?.format(DateTimeFormatter.ofPattern("MMMM yyyy", Locale.getDefault())) ?: "Undated"
         }
@@ -214,8 +284,65 @@ private fun DocumentsTab(filter: Filter, onFilter: (Filter) -> Unit, onOpen: (Lo
                 PaperCard(Modifier.padding(horizontal = Metrics.Gutter), padding = PaddingValues(horizontal = 14.dp, vertical = 4.dp)) {
                     list.forEachIndexed { i, d ->
                         if (i > 0) HairLine(Modifier.padding(start = 62.dp))
-                        DocRow(d, labels) { onOpen(d.id) }
+                        DocRow(
+                            d, labels,
+                            selected = if (selected.isEmpty()) null else d.id in selected,
+                            onLongClick = { toggle(d.id) },
+                        ) { if (selected.isEmpty()) onOpen(d.id) else toggle(d.id) }
                     }
+                }
+            }
+        }
+    }
+    bulk?.let { kind -> BulkSheet(kind, selected.toList(), onDismiss = { bulk = null }) }
+}
+
+@Composable
+private fun SelectionBar(count: Int, onClose: () -> Unit, onAll: () -> Unit, onKind: (LabelKind) -> Unit, onMerge: (() -> Unit)?, onTrash: () -> Unit) {
+    Column(Modifier.padding(top = 12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            CircleButton(Icons.Default.Close, "Cancel", onClose)
+            Spacer(Modifier.width(12.dp))
+            Text("$count selected", style = Type.LargeTitle, modifier = Modifier.weight(1f))
+            PillButton("All", onAll)
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            PillButton("Tags", { onKind(LabelKind.TAG) }, icon = Icons.Outlined.Label)
+            PillButton("Folder", { onKind(LabelKind.FOLDER) }, icon = Icons.Outlined.Folder)
+            PillButton("Sender", { onKind(LabelKind.CORRESPONDENT) }, icon = Icons.Outlined.Person)
+            PillButton("Type", { onKind(LabelKind.DOCTYPE) }, icon = Icons.Outlined.Category)
+            if (onMerge != null) PillButton("Merge", onMerge, icon = Icons.Outlined.CallMerge)
+            PillButton("Trash", onTrash, icon = Icons.Outlined.DeleteOutline)
+        }
+    }
+}
+
+/** Sets a label on many documents at once; tags can be added or removed. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun BulkSheet(kind: LabelKind, ids: List<Long>, onDismiss: () -> Unit) {
+    val options = query(kind, initial = emptyList<Label>()) { Store.labels(kind) }
+    val scope = rememberCoroutineScope()
+    ModalBottomSheet(onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), containerColor = Ink.Surface) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = Metrics.Gutter).navigationBarsPadding().padding(bottom = 16.dp)) {
+            Text("${kind.singular} for ${ids.size} document${if (ids.size == 1) "" else "s"}", style = Type.Title)
+            LazyColumn(Modifier.fillMaxWidth().height(380.dp)) {
+                if (kind != LabelKind.TAG) item {
+                    ListRow("None", trailing = null, onClick = { scope.launch(Dispatchers.IO) { Store.bulkSet(ids, kind, null) }; onDismiss() })
+                }
+                items(options, key = { it.id }) { l ->
+                    ListRow(
+                        l.name,
+                        leading = { Box(Modifier.size(10.dp).clip(CircleShape).background(Color(l.color))) },
+                        trailing = if (kind == LabelKind.TAG) ({
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                PillButton("Add", { scope.launch(Dispatchers.IO) { Store.bulkTag(ids, l.id, true) }; onDismiss() }, background = Ink.SurfaceHigh)
+                                PillButton("Remove", { scope.launch(Dispatchers.IO) { Store.bulkTag(ids, l.id, false) }; onDismiss() }, background = Ink.SurfaceHigh)
+                            }
+                        }) else null,
+                        onClick = if (kind == LabelKind.TAG) null else ({ scope.launch(Dispatchers.IO) { Store.bulkSet(ids, kind, l.id) }; onDismiss() }),
+                    )
                 }
             }
         }
@@ -244,24 +371,39 @@ private fun titleFor(f: Filter, labels: Map<Long, Label>): String = when {
     else -> "Documents"
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun DocRow(d: Document, labels: Map<Long, Label>, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().pressable(onClick).padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Thumb(d.thumbPath, Modifier.size(width = 46.dp, height = 58.dp), radius = 8.dp)
+fun DocRow(d: Document, labels: Map<Long, Label>, selected: Boolean? = null, onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().combinedClickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onLongClick = onLongClick, onClick = onClick).padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box {
+            Thumb(d.thumbPath, Modifier.size(width = 46.dp, height = 58.dp), radius = 8.dp)
+            if (selected != null) {
+                Box(
+                    Modifier.align(Alignment.Center).size(26.dp).clip(CircleShape)
+                        .background(if (selected) Ink.Text else Ink.Black.copy(alpha = 0.55f))
+                        .border(2.dp, Ink.Text, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) { if (selected) Icon(Icons.Default.Check, null, tint = Ink.Black, modifier = Modifier.size(16.dp)) }
+            }
+        }
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(d.title, style = Type.Body, maxLines = 1, overflow = TextOverflow.Ellipsis)
             val sub = listOfNotNull(d.correspondentId?.let { labels[it]?.name }, d.created?.let { Fmt.date(it) }).joinToString(" · ")
             if (sub.isNotEmpty()) Text(sub, style = Type.Caption, maxLines = 1, overflow = TextOverflow.Ellipsis)
             val tags = d.tagIds.mapNotNull { labels[it] }
-            if (tags.isNotEmpty() || d.pageCount > 1) {
+            if (tags.isNotEmpty() || d.pageCount > 1 || d.duplicateOf != null) {
                 Spacer(Modifier.height(5.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     tags.take(3).forEach { t ->
                         Box(Modifier.size(6.dp).clip(CircleShape).background(Color(t.color)))
-                        Text(t.name, style = Type.Caption.copy(fontSize = androidx.compose.ui.unit.TextUnit(11f, androidx.compose.ui.unit.TextUnitType.Sp)), maxLines = 1)
+                        Text(t.name, style = Type.Caption.copy(fontSize = 11.sp), maxLines = 1)
                     }
-                    if (d.pageCount > 1) Text("${d.pageCount} pages", style = Type.Caption.copy(color = Ink.Tertiary, fontSize = androidx.compose.ui.unit.TextUnit(11f, androidx.compose.ui.unit.TextUnitType.Sp)))
+                    if (d.pageCount > 1) Text("${d.pageCount} pages", style = Type.Caption.copy(color = Ink.Tertiary, fontSize = 11.sp))
+                    if (d.duplicateOf != null) Text("Possible copy", style = Type.Caption.copy(color = Ink.Danger, fontSize = 11.sp))
                 }
             }
         }
@@ -273,13 +415,17 @@ fun DocRow(d: Document, labels: Map<Long, Label>, onClick: () -> Unit) {
 }
 
 @Composable
-private fun SpendCard(docs: List<Document>) {
+private fun SpendCard(docs: List<Document>, onClick: () -> Unit) {
     val byCurrency = docs.groupBy { it.currency ?: "" }.mapValues { (_, l) -> l.sumOf { it.amount ?: 0.0 } }
     val main = byCurrency.maxByOrNull { it.value }
-    PaperCard {
-        Text("This month", style = Type.Caption)
+    PaperCard(Modifier.pressable(onClick)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("This month", style = Type.Caption, modifier = Modifier.weight(1f))
+            Text("Overview", style = Type.Caption.copy(color = Ink.Text))
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = Ink.Text, modifier = Modifier.size(16.dp))
+        }
         Spacer(Modifier.height(4.dp))
-        Text(Fmt.money(main?.value, main?.key?.ifEmpty { null }), style = Type.Amount)
+        Text(Fmt.money(main?.value ?: 0.0, main?.key?.ifEmpty { null }), style = Type.Amount)
         Text("across ${docs.size} receipt${if (docs.size == 1) "" else "s"} and invoices", style = Type.Caption)
     }
 }

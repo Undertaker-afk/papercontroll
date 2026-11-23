@@ -339,6 +339,13 @@ object Store {
         return true
     }
 
+    /** Replaces a page's image and what was read from it (after rotating), and refreshes the document's text. */
+    fun replacePage(page: Page, newPath: String, text: String, ocr: String) {
+        db.execSQL("UPDATE pages SET path = ?, text = ?, ocr = ? WHERE id = ?", arrayOf<Any>(newPath, text, ocr, page.id))
+        db.execSQL("UPDATE documents SET thumb = ? WHERE id = ? AND thumb = ?", arrayOf<Any>(newPath, page.docId, page.path))
+        document(page.docId)?.let { d -> updateDocument(d.copy(content = pages(page.docId).joinToString("\n\n") { it.text }, thumbPath = if (d.thumbPath == page.path) newPath else d.thumbPath)) }
+    }
+
     /** Points a page at a new image file (after rotating), and the thumbnail too if it showed that page. */
     fun replacePageImage(page: Page, newPath: String) {
         db.execSQL("UPDATE pages SET path = ? WHERE id = ?", arrayOf<Any>(newPath, page.id))

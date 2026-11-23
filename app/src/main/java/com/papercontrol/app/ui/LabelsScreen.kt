@@ -153,10 +153,11 @@ fun CustomFieldsCard() {
     val fields = query(initial = emptyList<CustomField>()) { Store.customFields() }
     var name by remember { mutableStateOf("") }
     var type by remember { mutableStateOf(FieldType.TEXT) }
+    var options by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
     PaperCard(padding = PaddingValues(16.dp)) {
         fields.forEach { f ->
-            ListRow(f.name, subtitle = f.type.title, trailing = {
+            ListRow(f.name, subtitle = f.type.title + if (f.options.isNotEmpty()) " · " + f.options.joinToString(", ") else "", trailing = {
                 Icon(Icons.Default.Close, "Delete", tint = Ink.Tertiary, modifier = Modifier.size(20.dp).pressable({ scope.launch(Dispatchers.IO) { Store.deleteCustomField(f) } }))
             })
             HairLine()
@@ -165,12 +166,14 @@ fun CustomFieldsCard() {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             FieldType.entries.forEach { t -> LabelChip(t.title, Ink.Secondary, selected = type == t) { type = t } }
         }
+        if (type == FieldType.SELECT) Field("Choices, separated by commas", options, { options = it }, placeholder = "Gas, Water, Electricity")
         Spacer(Modifier.height(12.dp))
         PillButton("Add field", {
             if (name.isNotBlank()) {
                 val n = name
-                scope.launch(Dispatchers.IO) { Store.saveCustomField(CustomField(name = n, type = type)) }
-                name = ""
+                val o = options.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+                scope.launch(Dispatchers.IO) { Store.saveCustomField(CustomField(name = n, type = type, options = if (type == FieldType.SELECT) o else emptyList())) }
+                name = ""; options = ""
             }
         }, icon = Icons.Default.Check, background = Ink.SurfaceHigh)
     }

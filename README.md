@@ -5,22 +5,35 @@ running on the phone.
 
 ![Screens](docs/screens.png)
 
-- **Scan.** Live paper detection with corner brackets, auto-capture, torch. The photo is
-  straightened and cleaned up, the text is read, and the page turns into a digital card in
-  one continuous animation (below).
-- **Read.** Receipts and invoices are parsed into merchant, address, date, time, order and
-  table number, line items, subtotal, tax, total, card and auth code. English and German.
+- **Scan.** The camera outlines the page it will cut out, live, with corner brackets that run
+  along its real edges. It holds still for a moment, takes the photo, straightens the page,
+  cleans it up like a scanner (even lighting, white paper) and turns it upright, even when
+  it was photographed sideways. Then the page turns into a digital card in one continuous
+  animation (below).
+- **Read.** Receipts and invoices become merchant, address, date, time, order and table
+  number, line items, subtotal, tax, total, card and auth code. English, German, French,
+  Spanish, Italian, Dutch and Portuguese; Chinese, Japanese, Korean and Devanagari can be
+  switched on.
 - **Sort automatically.** Tags, correspondents, document types and folders, with the
   Paperless-ngx matching algorithms (any word, all words, exact, regex, fuzzy, **Auto**).
-  Auto is a classifier that learns from the documents you have already sorted. New senders
-  are created from the name on the paper.
+  Auto learns from the documents you have already sorted. New senders are created from the
+  name on the paper. Title and folder templates like `{correspondent} · {created_year}`.
 - **Paper mapping.** Import a pile of photos (or share them to the app). Pages of the same
-  document are found, ordered and kept together as one document in its own folder. Long
-  receipts photographed in parts are stitched in order.
-- **Optional on-device AI model** (Gemma 4 E2B via LiteRT-LM): writes titles, fills in what
-  the rules miss, sorts into your existing labels and settles close calls in paper mapping.
-- **Optional Paperless-ngx server**: upload documents with title, date, correspondent, type,
-  storage path (from the folder) and tags. Missing ones are created on the server.
+  document are found, ordered and kept together as one document. Long receipts photographed
+  in parts are stitched in order. A separator sheet in a stack splits it exactly.
+- **Deadlines.** Payment due dates, warranty ends, cancellation deadlines and expiry dates
+  are read from the text and you are notified before they pass.
+- **Payment codes.** The IBAN, amount and reference from a GiroCode / EPC or Swiss QR bill
+  are shown ready to copy.
+- **Search by meaning, similar documents, ask your documents.** With the optional search
+  model, "washing machine warranty" finds the right receipt in other words or languages.
+  With the optional chat model, "how much did I spend on coffee last month?" is answered
+  from your archive, naming the documents it used (sums are computed exactly, not guessed).
+- **Overview.** Spending per month, by type and by sender, and a CSV export.
+- **Duplicates.** The same receipt scanned twice is flagged, on the scan and on import.
+- **Backup.** The whole archive in one file, by hand or weekly into a folder you pick, and
+  optionally two-way sync with a Paperless-ngx server.
+- **Private.** Optional app lock (fingerprint, face or screen lock) and hidden previews.
 
 Nothing leaves the phone unless you set up a Paperless-ngx server or download the AI model.
 
@@ -49,13 +62,16 @@ and clean-up run on a frame of the receipt) into `app/build/screens/`.
 
 | Step | Code |
 |---|---|
-| Find the paper | `core/QuadDetector`: Otsu threshold → largest bright region → corners along the diagonals |
-| Straighten and clean | `processing/Images`: perspective warp (`Matrix.setPolyToPoly`), paper to white, more contrast |
+| Find the page | `vision/DocDetector` (OpenCV): print removed by a grayscale closing, local contrast raised, edges traced at several sensitivities; every region the edges enclose is a candidate quadrilateral, scored by edge support along its sides, right angles, paper-like proportions, brightness against its surroundings and by containing the printed content. Falls back to the content box, and for pale receipts on dark tables to a bright shape. This is what finds a white sheet on a white desk. |
+| Straighten and clean | `vision/Cv`: bicubic perspective warp; the lighting is estimated and divided out, levels stretched, light unsharp mask; colours kept |
+| Turn upright | The direction of every recognized line (ML Kit) decides; sideways and upside-down pages are rotated and read again |
 | Read text | `ml/TextReader`: ML Kit text recognition, bundled model, offline |
 | Read fields | `core/ReceiptParser`: works on visual rows, so a label on the left and its price on the right are read together |
 | Sort | `processing/Sorter`: your rules first, then the Auto classifier (`core/Classifier`, naive Bayes retrained whenever the archive changes), then what the paper says, then the AI model if it is on |
 | Paper mapping | `core/PaperMapper`: scores every pair of pages, then clusters by average linkage |
-| Store | `data/Store`: SQLite with an FTS4 full-text index |
+| Store | `data/Store`: SQLite with an FTS4 full-text index; trash, reminders and search vectors |
+| Search by meaning | `ml/Embedder`: EmbeddingGemma 2 via LiteRT-LM; query and documents in one vector space |
+| Ask | `processing/Assistant`: finds the documents (meaning, words, the period named), computes sums exactly, lets the chat model answer and cite |
 
 ### Paper mapping evidence
 
@@ -85,10 +101,19 @@ reasons and lets you move pages, split them off or join documents before saving.
 | Matching: none, any, all, exact, regex, fuzzy, auto | ✓ |
 | Full-text search, `tag:` / `correspondent:` / `type:` filters | ✓ plus `folder:`, `asn:`, `year:` |
 | Saved views | ✓ |
-| Custom fields | ✓ text, number, amount, date, yes/no, link |
+| Custom fields | ✓ text, number, amount, date, yes/no, link, choice, link to another document |
+| Title and storage-path templates | ✓ `{correspondent}`, `{created_year}`, `{document_type}` … with live preview |
+| Barcodes | ✓ archive-number stickers and separator sheets, read on scan; printable sheets are made in Settings |
+| Bulk edit | ✓ long-press to select: tags, folder, sender, type, merge, trash |
+| Trash | ✓ 30 days, then removed for good |
+| Similar documents, duplicate detection | ✓ |
+| Page tools | ✓ rotate, delete, reorder, split |
+| Searchable PDF | ✓ the shared PDF carries the recognized text invisibly, so it can be searched and copied |
+| Search | ✓ `created:2023..2024`, `added:7d`, `amount:>50`, `is:inbox`, `is:due`, `-tag:x`, `field:Name=value` |
 | Notes | ✓ |
 | Merge and split documents, reorder pages | ✓ |
 | Consume from share / upload | ✓ share images or PDFs to the app, or import from the app |
+| Server sync | ✓ two-way with a Paperless-ngx server |
 | PDF export | ✓ share as PDF, or save every folder to `Downloads/PaperControl/<folder>/` |
 
 ## Build
@@ -99,7 +124,15 @@ reasons and lets you move pages, split them off or join documents before saving.
 ```
 
 The APK is at `app/build/outputs/apk/debug/app-debug.apk`; CI builds it on every push.
-Android 9 or newer. The optional AI model needs about 3 GB of free memory.
+Android 9 or newer. The optional AI model needs about 3 GB of free memory. Release builds
+are arm64 only (about 125 MB with OpenCV and the on-device models); debug builds also
+include x86_64 for emulators.
+
+Tests run each class in its own process, because Robolectric's graphics and OpenCV's desktop
+library cannot share one. Tests that need a personal photo read it from
+`app/src/test/resources/private/` (not in the repository) and skip when it is missing; the
+page finder is also tested on drawn scenes (a white sheet on a pale desk, a receipt on a dark
+table, an empty desk).
 
 ### Signed releases (GitHub Actions)
 

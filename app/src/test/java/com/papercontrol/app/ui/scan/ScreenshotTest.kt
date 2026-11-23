@@ -4,6 +4,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeUp
 import androidx.test.core.app.ApplicationProvider
 import com.github.takahirom.roborazzi.RoborazziOptions
 import com.github.takahirom.roborazzi.RoborazziTaskType
@@ -128,7 +130,9 @@ class ScreenshotTest {
     fun mainScreens() {
         val c = capture()
         val file = Images.save(c.clean, File(ApplicationProvider.getApplicationContext<android.content.Context>().cacheDir, "doc.jpg"))
-        val ex = ReceiptParser.parse(receiptOcr, java.util.Locale.US)
+        val ex = ReceiptParser.parse(receiptOcr, java.util.Locale.US).copy(
+            payment = com.papercontrol.app.core.Payment("DE33100205000001194700", "Nordlit Coffee GmbH", 18.90, "EUR", "RE-2231", null, "BFSWDE33BER", "EPC"),
+        )
         val receipts = Store.labels(LabelKind.FOLDER).first { it.name == "Receipts" }.id
         val type = Store.labels(LabelKind.DOCTYPE).first { it.name == "Receipt" }.id
         val inbox = Store.inboxTagIds()
@@ -160,8 +164,22 @@ class ScreenshotTest {
             repeat(40) { compose.mainClock.advanceTimeByFrame() }
             shoot(tab.name.lowercase())
         }
+        Store.saveReminder(com.papercontrol.app.data.Reminder(docId = id, date = LocalDate.now().plusDays(5), kind = com.papercontrol.app.core.DeadlineKind.PAYMENT, note = "14 days after the invoice date"))
+        Store.saveReminder(com.papercontrol.app.data.Reminder(docId = id, date = LocalDate.now().plusDays(300), kind = com.papercontrol.app.core.DeadlineKind.WARRANTY))
         compose.runOnUiThread { routeState.value = Route.Doc(id) }
-        compose.mainClock.advanceTimeBy(500)
+        // The screen reads the archive on a background thread: give it real time to arrive.
+        repeat(150) {
+            compose.mainClock.advanceTimeByFrame()
+            if (compose.onAllNodes(androidx.compose.ui.test.hasScrollAction()).fetchSemanticsNodes().isNotEmpty()) return@repeat
+            Thread.sleep(20)
+        }
+        repeat(40) { compose.mainClock.advanceTimeByFrame() }
         shoot("document")
+        // Scroll the page itself (the first scrollable node), a screenful at a time.
+        for (i in 2..5) {
+            compose.onAllNodes(androidx.compose.ui.test.hasScrollAction())[0].performTouchInput { swipeUp(startY = height * 0.8f, endY = height * 0.3f, durationMillis = 2500) }
+            repeat(45) { compose.mainClock.advanceTimeByFrame() }
+            shoot("document_$i")
+        }
     }
 }

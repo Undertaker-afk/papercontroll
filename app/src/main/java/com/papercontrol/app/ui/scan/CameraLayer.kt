@@ -222,7 +222,7 @@ fun CameraLayer(
     fun shoot() {
         if (capturing) return
         capturing = true
-        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+        view.performHapticFeedback(if (android.os.Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.VIRTUAL_KEY)
         val live = detection.quad
         imageCapture.takePicture(ContextCompat.getMainExecutor(context), object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(image: ImageProxy) {

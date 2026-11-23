@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.CallMerge
 import androidx.compose.material.icons.outlined.CallSplit
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.ChevronLeft
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.DeleteOutline
@@ -163,6 +164,14 @@ private fun ProposalCard(index: Int, p: Proposal, selected: Pair<Int, Int>?, onS
                         modifier = Modifier.align(Alignment.BottomEnd).padding(5.dp).clip(CircleShape).background(Ink.Black.copy(alpha = 0.7f)).padding(horizontal = 6.dp, vertical = 1.dp),
                     )
                 }
+            }
+        }
+        p.duplicates.firstOrNull()?.let { dup ->
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.Top) {
+                Icon(Icons.Outlined.ContentCopy, null, tint = Ink.Danger, modifier = Modifier.size(14.dp).padding(top = 2.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("May be a copy: ${dup.reason.lowercase()} as “${dup.title}”", style = Type.Caption.copy(color = Ink.Danger))
             }
         }
         if (p.reasons.isNotEmpty() && p.pages.size > 1) {

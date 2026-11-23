@@ -214,6 +214,14 @@ object Consumer {
         id
     }
 
+    /** Turns a stored page by [degrees] clockwise, reads it again and updates the document. */
+    suspend fun rotatePage(page: Page, degrees: Int) = withContext(Dispatchers.IO) {
+        val rotated = Images.rotateFile(page.path, degrees) ?: return@withContext
+        val bmp = Images.decode(rotated, Images.MAX_SIDE) ?: return@withContext
+        val ocr = TextReader.read(bmp)
+        Store.replacePage(page, rotated.path, ocr.text, TextReader.toJson(ocr))
+    }
+
     /** Removes the files of pages that were scanned but not kept. */
     fun discard(pages: List<PreparedPage>) {
         pages.forEach { it.file.delete(); it.original?.delete() }

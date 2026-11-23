@@ -3,7 +3,26 @@ package com.papercontrol.app.ui
 import android.content.Intent
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.NotificationsActive
+import androidx.compose.material.icons.outlined.RestoreFromTrash
+import androidx.compose.material.icons.outlined.RotateLeft
+import androidx.compose.material.icons.outlined.RotateRight
+import androidx.compose.material.icons.outlined.Payments
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import com.papercontrol.app.core.DeadlineKind
+import com.papercontrol.app.core.Payment
+import com.papercontrol.app.data.FieldType
+import com.papercontrol.app.data.Reminder
+import com.papercontrol.app.processing.Consumer
+import com.papercontrol.app.processing.Search
+import java.time.temporal.ChronoUnit
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -87,14 +106,17 @@ import java.time.LocalDate
 
 @Composable
 fun DocumentScreen(id: Long, onBack: () -> Unit, onOpen: (Long) -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val doc = query(id, initial = null as Document?) { Store.document(id) }
     val pages = query(id, initial = emptyList<Page>()) { Store.pages(id) }
     val labels = query(initial = emptyMap<Long, Label>()) { Store.allLabels() }
     val fields = query(id, initial = emptyList<FieldValue>()) { Store.fieldValues(id) }
     val allFields = query(initial = emptyList<CustomField>()) { Store.customFields() }
     val notes = query(id, initial = emptyList<Note>()) { Store.notes(id) }
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    val reminders = query(id, initial = emptyList<Reminder>()) { Store.reminders(docId = id) }
+    val similar = query(id, initial = emptyList<Document>()) { Store.document(id)?.let { Search.similar(context, it) }.orEmpty() }
+    val copyOf = query(id, initial = null as Document?) { Store.document(id)?.duplicateOf?.let { Store.document(it) } }
     var menu by remember { mutableStateOf(false) }
     var picking by remember { mutableStateOf<LabelKind?>(null) }
     var editTitle by remember { mutableStateOf(false) }
@@ -103,6 +125,7 @@ fun DocumentScreen(id: Long, onBack: () -> Unit, onOpen: (Long) -> Unit) {
     var showContent by remember { mutableStateOf(false) }
     var showPhoto by remember { mutableStateOf(false) }
     var note by remember { mutableStateOf("") }
+    var addReminder by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf<String?>(null) }
 
     val d = doc ?: run {
@@ -173,7 +196,7 @@ fun DocumentScreen(id: Long, onBack: () -> Unit, onOpen: (Long) -> Unit) {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = Metrics.Gutter, end = Metrics.Gutter, bottom = 40.dp)) {
             item {
                 Row(verticalAlignment = Alignment.Top, modifier = Modifier.pressable({ editTitle = true }).padding(top = 4.dp)) {
-                    Text(d.title, style = Type.LargeTitle, modifier = Modifier.weight(1f))
+                    Text(d.title, style = Type.LargeTitle, maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                     Icon(Icons.Outlined.Edit, "Rename", tint = Ink.Tertiary, modifier = Modifier.padding(top = 10.dp).size(18.dp))
                 }
                 val sub = listOfNotNull(d.created?.let { Fmt.date(it) }, d.asn?.let { "ASN $it" }, "${d.pageCount} page${if (d.pageCount == 1) "" else "s"}").joinToString(" · ")
@@ -183,12 +206,75 @@ fun DocumentScreen(id: Long, onBack: () -> Unit, onOpen: (Long) -> Unit) {
                     Spacer(Modifier.height(12.dp))
                     PillButton("Done · remove from inbox", { update { it.copy(tagIds = it.tagIds.filter { t -> t !in inboxIds }) } }, icon = Icons.Default.Check, background = Ink.Text, contentColor = Ink.Black)
                 }
+                if (d.deletedAt != null) {
+                    Spacer(Modifier.height(12.dp))
+                    PaperCard(padding = PaddingValues(14.dp)) {
+                        val left = Store.TRASH_DAYS - ((System.currentTimeMillis() - d.deletedAt) / 86_400_000L).toInt()
+                        Text("In the trash · $left days left", style = Type.Body)
+                        Spacer(Modifier.height(10.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            PillButton("Restore", { scope.launch(Dispatchers.IO) { Store.restore(listOf(d.id)) } }, icon = Icons.Outlined.RestoreFromTrash, background = Ink.Text, contentColor = Ink.Black)
+                            PillButton("Delete forever", { scope.launch { withContext(Dispatchers.IO) { Store.purgeDocument(d.id) }; onBack() } }, icon = Icons.Outlined.DeleteOutline, background = Ink.SurfaceHigh)
+                        }
+                    }
+                }
+                copyOf?.let { other ->
+                    Spacer(Modifier.height(12.dp))
+                    PaperCard(padding = PaddingValues(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Outlined.ContentCopy, null, tint = Ink.Danger, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text("May be a copy", style = Type.Body)
+                                Text("Looks like “${other.title}”", style = Type.Caption, maxLines = 2)
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            PillButton("Open", { onOpen(other.id) }, background = Ink.SurfaceHigh)
+                            PillButton("Not a copy", { scope.launch(Dispatchers.IO) { Store.setPageHash(d.id, d.pageHash, null) } }, background = Ink.SurfaceHigh)
+                            PillButton("Delete this", { scope.launch { withContext(Dispatchers.IO) { Store.trash(listOf(d.id)) }; onBack() } }, background = Ink.SurfaceHigh)
+                        }
+                    }
+                }
                 Spacer(Modifier.height(16.dp))
             }
             item { PagesView(d, pages, showPhoto, { showPhoto = !showPhoto }, onSplit = { p -> scope.launch { val n = withContext(Dispatchers.IO) { Store.splitPage(p) }; if (n != null) onOpen(n) } }) }
             item {
                 Spacer(Modifier.height(16.dp))
                 ReceiptCard(ex, d.title, currency = d.currency ?: ex.currency, fallbackText = d.content)
+                ex.payment?.let { pay ->
+                    Spacer(Modifier.height(12.dp))
+                    PaymentCard(pay, d.currency ?: ex.currency)
+                }
+                SectionTitle("Deadlines")
+                PaperCard(padding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)) {
+                    if (reminders.isEmpty()) Text("None found. Add one to be reminded.", style = Type.BodySecondary, modifier = Modifier.padding(vertical = 12.dp))
+                    reminders.forEachIndexed { i, r ->
+                        if (i > 0) HairLine()
+                        val days = ChronoUnit.DAYS.between(java.time.LocalDate.now(), r.date)
+                        ListRow(
+                            r.kind.label,
+                            subtitle = Fmt.date(r.date) + if (r.note.isNotBlank()) " · ${r.note}" else "",
+                            leading = {
+                                Box(
+                                    Modifier.size(26.dp).clip(CircleShape).background(if (r.done) Ink.Text else Ink.SurfaceHigh)
+                                        .pressable({ scope.launch(Dispatchers.IO) { Store.saveReminder(r.copy(done = !r.done)) } }),
+                                    contentAlignment = Alignment.Center,
+                                ) { if (r.done) Icon(Icons.Default.Check, "Done", tint = Ink.Black, modifier = Modifier.size(16.dp)) }
+                            },
+                            trailing = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (!r.done) Text(when { days < 0 -> "overdue"; days == 0L -> "today"; else -> "in ${days}d" }, style = Type.Caption.copy(color = if (days <= 3) Ink.Danger else Ink.Secondary))
+                                    Spacer(Modifier.width(8.dp))
+                                    Icon(Icons.Default.Close, "Remove", tint = Ink.Tertiary, modifier = Modifier.size(20.dp).pressable({ scope.launch(Dispatchers.IO) { Store.deleteReminder(r.id) } }))
+                                }
+                            },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                PillButton("Add deadline", { addReminder = true }, icon = Icons.Outlined.NotificationsActive)
             }
             item {
                 SectionTitle("Filed as")
@@ -214,11 +300,7 @@ fun DocumentScreen(id: Long, onBack: () -> Unit, onOpen: (Long) -> Unit) {
                         allFields.forEachIndexed { i, f ->
                             if (i > 0) HairLine()
                             val v = fields.firstOrNull { it.field.id == f.id }?.value.orEmpty()
-                            var text by remember(f.id, v) { mutableStateOf(v) }
-                            Field(f.name + " · " + f.type.title.lowercase(), text, {
-                                text = it
-                                scope.launch(Dispatchers.IO) { Store.setFieldValue(d.id, f.id, it.ifBlank { null }) }
-                            }, number = f.type == com.papercontrol.app.data.FieldType.NUMBER || f.type == com.papercontrol.app.data.FieldType.MONETARY)
+                            FieldEditor(f, v) { nv -> scope.launch(Dispatchers.IO) { Store.setFieldValue(d.id, f.id, nv?.ifBlank { null }) } }
                         }
                     }
                 }
@@ -237,6 +319,15 @@ fun DocumentScreen(id: Long, onBack: () -> Unit, onOpen: (Long) -> Unit) {
                     Field("Add a note", note, { note = it }, singleLine = false)
                     if (note.isNotBlank()) PillButton("Add note", { val t = note; note = ""; scope.launch(Dispatchers.IO) { Store.addNote(d.id, t) } }, background = Ink.SurfaceHigh)
                 }
+                if (similar.isNotEmpty()) {
+                    SectionTitle("Similar documents")
+                    PaperCard(padding = PaddingValues(horizontal = 14.dp, vertical = 4.dp)) {
+                        similar.forEachIndexed { i, o ->
+                            if (i > 0) HairLine(Modifier.padding(start = 62.dp))
+                            DocRow(o, labels) { onOpen(o.id) }
+                        }
+                    }
+                }
                 SectionTitle("Text")
                 PaperCard(padding = PaddingValues(16.dp), modifier = Modifier.pressable({ showContent = !showContent })) {
                     Text(d.content.ifBlank { "No text recognized." }, style = Type.BodySecondary, maxLines = if (showContent) Int.MAX_VALUE else 6, overflow = TextOverflow.Ellipsis)
@@ -248,6 +339,7 @@ fun DocumentScreen(id: Long, onBack: () -> Unit, onOpen: (Long) -> Unit) {
     picking?.let { kind -> LabelPicker(kind, d, labels.values.filter { it.kind == kind }, onDismiss = { picking = null }) { updated -> update { updated } } }
     if (editTitle) TextSheet("Title", d.title, onDismiss = { editTitle = false }) { t -> update { it.copy(title = t) } }
     if (editMeta) MetaSheet(d, onDismiss = { editMeta = false }) { updated -> update { updated } }
+    if (addReminder) ReminderSheet(d.id, onDismiss = { addReminder = false })
     if (merging) MergeSheet(d, onDismiss = { merging = false }) { other ->
         scope.launch(Dispatchers.IO) { Store.mergeDocuments(d.id, listOf(other)) }
         merging = false
@@ -283,8 +375,14 @@ private fun PagesView(d: Document, pages: List<Page>, showPhoto: Boolean, onTogg
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("${pager.currentPage + 1} / ${pages.size}", style = Type.Caption, modifier = Modifier.weight(1f))
             PillButton(if (showPhoto) "Scan" else "Photo", onTogglePhoto, icon = Icons.Outlined.PhotoCamera)
+            val here = pages.getOrNull(pager.currentPage)
+            if (here != null) {
+                CircleButton(Icons.Outlined.RotateLeft, "Rotate left", { scope.launch { Consumer.rotatePage(here, -90) } })
+                CircleButton(Icons.Outlined.RotateRight, "Rotate right", { scope.launch { Consumer.rotatePage(here, 90) } })
+            }
             if (pages.size > 1) {
                 val cur = pager.currentPage
+                CircleButton(Icons.Outlined.DeleteOutline, "Delete this page", { scope.launch(Dispatchers.IO) { Store.deletePage(pages[cur]) } })
                 CircleButton(Icons.Outlined.ChevronLeft, "Move page left", {
                     if (cur > 0) scope.launch(Dispatchers.IO) {
                         val ids = pages.map { it.id }.toMutableList(); ids.add(cur - 1, ids.removeAt(cur)); Store.reorderPages(d.id, ids)
@@ -415,6 +513,122 @@ private fun MergeSheet(d: Document, onDismiss: () -> Unit, onPick: (Long) -> Uni
             LazyColumn(Modifier.fillMaxWidth().height(420.dp)) {
                 items(docs, key = { it.id }) { o -> DocRow(o, labels) { onPick(o.id) } }
             }
+        }
+    }
+}
+
+
+@Composable
+private fun PaymentCard(p: Payment, currency: String?) {
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    fun copy(label: String, text: String) { clipboard.setText(AnnotatedString(text)); Toast.makeText(context, "$label copied", Toast.LENGTH_SHORT).show() }
+    PaperCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconCircle(Icons.Outlined.Payments, size = 40.dp)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Pay with ${p.standard} code", style = Type.Headline)
+                Text("Read from the QR code on the paper", style = Type.Caption)
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+        HairLine()
+        Spacer(Modifier.height(12.dp))
+        p.name?.let { KeyValue("To", it, style = Type.BodySecondary, rightStyle = Type.Body); Spacer(Modifier.height(8.dp)) }
+        KeyValue("IBAN", p.ibanPretty, style = Type.BodySecondary, rightStyle = Type.Body)
+        p.bic?.let { Spacer(Modifier.height(8.dp)); KeyValue("BIC", it, style = Type.BodySecondary, rightStyle = Type.Body) }
+        p.amount?.let { Spacer(Modifier.height(8.dp)); KeyValue("Amount", Fmt.money(it, p.currency ?: currency), style = Type.BodySecondary, rightStyle = Type.Headline) }
+        (p.reference ?: p.message)?.let { Spacer(Modifier.height(8.dp)); KeyValue(if (p.reference != null) "Reference" else "Message", it, style = Type.BodySecondary, rightStyle = Type.Body) }
+        Spacer(Modifier.height(14.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+            PillButton("IBAN", { copy("IBAN", p.iban) }, icon = Icons.Outlined.ContentCopy, background = Ink.SurfaceHigh)
+            p.amount?.let { PillButton("Amount", { copy("Amount", String.format(java.util.Locale.ROOT, "%.2f", it)) }, icon = Icons.Outlined.ContentCopy, background = Ink.SurfaceHigh) }
+            (p.reference ?: p.message)?.let { r -> PillButton("Reference", { copy("Reference", r) }, icon = Icons.Outlined.ContentCopy, background = Ink.SurfaceHigh) }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ReminderSheet(docId: Long, onDismiss: () -> Unit) {
+    var date by remember { mutableStateOf(java.time.LocalDate.now().plusDays(7).toString()) }
+    var kind by remember { mutableStateOf(DeadlineKind.PAYMENT) }
+    var note by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    val parsed = runCatching { java.time.LocalDate.parse(date.trim()) }.getOrNull()
+    ModalBottomSheet(onDismiss, containerColor = Ink.Surface) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = Metrics.Gutter).navigationBarsPadding().padding(bottom = 16.dp)) {
+            Text("Add deadline", style = Type.Title)
+            Spacer(Modifier.height(8.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                DeadlineKind.entries.forEach { k -> LabelChip(k.label, Ink.Iris[2], selected = kind == k) { kind = k } }
+            }
+            Field("Date (YYYY-MM-DD)", date, { date = it })
+            Field("Note", note, { note = it })
+            Spacer(Modifier.height(12.dp))
+            PrimaryButton("Add", {
+                parsed?.let { d -> scope.launch(Dispatchers.IO) { Store.saveReminder(Reminder(docId = docId, date = d, kind = kind, note = note.trim())) } }
+                onDismiss()
+            }, enabled = parsed != null)
+        }
+    }
+}
+
+/** An editor that fits the field's type. [onChange] gets null to clear the value. */
+@Composable
+private fun FieldEditor(f: com.papercontrol.app.data.CustomField, value: String, onChange: (String?) -> Unit) {
+    when (f.type) {
+        FieldType.BOOLEAN -> ListRow(
+            f.name,
+            trailing = {
+                Switch(
+                    checked = value == "true", onCheckedChange = { onChange(if (it) "true" else "false") },
+                    colors = SwitchDefaults.colors(checkedThumbColor = Ink.Black, checkedTrackColor = Ink.Text, uncheckedThumbColor = Ink.Secondary, uncheckedTrackColor = Ink.SurfaceHigh, uncheckedBorderColor = Ink.SurfaceHigh),
+                )
+            },
+            onClick = { onChange(if (value == "true") "false" else "true") },
+        )
+        FieldType.SELECT -> Column(Modifier.padding(vertical = 8.dp)) {
+            Text(f.name, style = Type.Caption)
+            Spacer(Modifier.height(8.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                f.options.forEach { o -> LabelChip(o, Ink.Iris[4], selected = value == o) { onChange(if (value == o) null else o) } }
+                if (f.options.isEmpty()) Text("No choices yet. Add them under Labels → Custom fields.", style = Type.Caption)
+            }
+        }
+        FieldType.DOCLINK -> {
+            val linked = query(value, initial = null as Document?) { value.toLongOrNull()?.let { Store.document(it) } }
+            var picking by remember { mutableStateOf(false) }
+            ListRow(
+                f.name, subtitle = linked?.title ?: "Not linked",
+                trailing = { PillButton(if (linked == null) "Link" else "Change", { picking = true }, background = Ink.SurfaceHigh) },
+            )
+            if (picking) DocPicker(onDismiss = { picking = false }) { id -> onChange(id.toString()); picking = false }
+        }
+        else -> {
+            var text by remember(f.id, value) { mutableStateOf(value) }
+            Field(
+                f.name + " · " + f.type.title.lowercase(), text, { text = it; onChange(it) },
+                number = f.type == FieldType.NUMBER || f.type == FieldType.MONETARY,
+                placeholder = if (f.type == FieldType.DATE) "YYYY-MM-DD" else "",
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DocPicker(onDismiss: () -> Unit, onPick: (Long) -> Unit) {
+    var q by remember { mutableStateOf("") }
+    val docs = query(q, initial = emptyList<Document>()) { Store.documents(Filter(query = q), 60) }
+    val labels = query(initial = emptyMap<Long, Label>()) { Store.allLabels() }
+    ModalBottomSheet(onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), containerColor = Ink.Surface) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = Metrics.Gutter).navigationBarsPadding()) {
+            Text("Link a document", style = Type.Title)
+            Spacer(Modifier.height(12.dp))
+            SearchField(q, { q = it }, "Find a document")
+            LazyColumn(Modifier.fillMaxWidth().height(420.dp)) { items(docs, key = { it.id }) { o -> DocRow(o, labels) { onPick(o.id) } } }
         }
     }
 }

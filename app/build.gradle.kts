@@ -16,10 +16,6 @@ android {
         versionCode = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
         versionName = System.getenv("VERSION_NAME")?.removePrefix("v") ?: "0.1.0"
 
-        ndk {
-            // LiteRT-LM ships native libraries for these two ABIs only.
-            abiFilters += listOf("arm64-v8a", "x86_64")
-        }
     }
 
     // Release signing comes from the environment (GitHub Actions secrets), never from the repo.
@@ -37,8 +33,13 @@ android {
     }
 
     buildTypes {
+        // LiteRT-LM ships native libraries for arm64 and x86_64 only. Phones are arm64; the larger
+        // x86_64 libraries (OpenCV alone is 59 MB) are only for emulators, so debug builds keep them.
+        debug {
+            ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+        }
         release {
-            ndk { abiFilters.clear(); abiFilters += "arm64-v8a" }
+            ndk { abiFilters += "arm64-v8a" }
             isMinifyEnabled = false
             if (keystore != null) signingConfig = signingConfigs.getByName("release")
         }
@@ -59,7 +60,8 @@ android {
 
     testOptions {
         unitTests.isIncludeAndroidResources = true
-        unitTests.all { it.maxHeapSize = "3g" }
+        // Robolectric's native graphics and OpenCV's desktop library must not share a process.
+        unitTests.all { it.maxHeapSize = "3g"; it.forkEvery = 1 }
     }
 }
 
@@ -84,6 +86,8 @@ dependencies {
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
     // Document detection, perspective correction and scan clean-up.
     implementation("org.opencv:opencv:4.13.0")
+    // Printable barcode sheets (separator sheet, archive-number labels).
+    implementation("com.google.zxing:core:3.5.3")
     // App lock.
     implementation("androidx.biometric:biometric:1.1.0")
     // Backup folder access.

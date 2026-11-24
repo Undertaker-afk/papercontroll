@@ -11,6 +11,7 @@ import com.papercontrol.app.work.SyncWorker
 class App : Application() {
     override fun onCreate() {
         super.onCreate()
+        CrashLog.install(this)
         Settings.init(this)
         Store.init(this)
         // The page finder; falls back to plain code if the native library cannot load.

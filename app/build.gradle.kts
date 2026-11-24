@@ -61,7 +61,16 @@ android {
     testOptions {
         unitTests.isIncludeAndroidResources = true
         // Robolectric's native graphics and OpenCV's desktop library must not share a process.
-        unitTests.all { it.maxHeapSize = "3g"; it.forkEvery = 1 }
+        unitTests.all {
+            it.maxHeapSize = "3g"
+            it.forkEvery = 1
+            // The pixel-rendering tests (ScreenshotTest) use Robolectric's native graphics, which can
+            // abort the whole test JVM on some machines ("JniConstants: Class not found: java/nio/...",
+            // exit value 134). They are for looking at the screens, so they are opt-in:
+            //   ./gradlew :app:testDebugUnitTest -Pscreenshots     (images go to app/build/screens)
+            // ScreensSmokeTest checks the same screens without rendering and always runs.
+            if (!project.hasProperty("screenshots")) it.exclude("**/ScreenshotTest*")
+        }
     }
 }
 

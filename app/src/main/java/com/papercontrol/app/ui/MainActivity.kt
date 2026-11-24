@@ -25,6 +25,11 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -176,6 +181,7 @@ class MainActivity : FragmentActivity() {
         LaunchedEffect(locked) { if (locked) unlock() }
 
         BackHandler(enabled = nav.stack.size > 1 && nav.top !is Route.Scan) { nav.pop() }
+        var report by remember { mutableStateOf(com.papercontrol.app.CrashLog.pending()) }
 
         Box(Modifier.fillMaxSize().background(Ink.Black)) {
             AnimatedContent(
@@ -212,6 +218,7 @@ class MainActivity : FragmentActivity() {
                 }
             }
             AnimatedVisibility(locked, enter = fadeIn(), exit = fadeOut()) { LockScreen(onUnlock = ::unlock) }
+            report?.let { text -> CrashDialog(text, onDismiss = { com.papercontrol.app.CrashLog.clear(); report = null }) }
         }
     }
 
@@ -225,7 +232,17 @@ class MainActivity : FragmentActivity() {
 fun <T> query(vararg keys: Any?, initial: T, block: suspend () -> T): T {
     val version by Store.version.collectAsState()
     var value by remember(*keys) { mutableStateOf(initial) }
-    LaunchedEffect(version, *keys) { value = withContext(Dispatchers.IO) { block() } }
+    LaunchedEffect(version, *keys) {
+        // A failed read keeps what is on screen instead of closing the app.
+        value = try {
+            withContext(Dispatchers.IO) { block() }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            com.papercontrol.app.CrashLog.note("reading the archive", t)
+            value
+        }
+    }
     return value
 }
 
@@ -233,4 +250,32 @@ fun <T> query(vararg keys: Any?, initial: T, block: suspend () -> T): T {
 fun shareFile(context: android.content.Context, file: java.io.File, mime: String, title: String) {
     val uri = FileProvider.getUriForFile(context, context.packageName + ".files", file)
     context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION), title))
+}
+
+/** What went wrong last time, with the exact error, ready to share. */
+@Composable
+private fun CrashDialog(text: String, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Ink.Surface,
+        title = { androidx.compose.material3.Text("PaperControl closed unexpectedly", style = com.papercontrol.app.ui.theme.Type.Title) },
+        text = {
+            androidx.compose.foundation.layout.Column {
+                androidx.compose.material3.Text("This is what went wrong. Share it so it can be fixed.", style = com.papercontrol.app.ui.theme.Type.Caption)
+                androidx.compose.foundation.layout.Spacer(Modifier.height(8.dp))
+                androidx.compose.material3.Text(
+                    text.take(4000),
+                    style = com.papercontrol.app.ui.theme.Type.Caption.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, fontSize = 10.sp),
+                    modifier = Modifier.heightIn(max = 320.dp).verticalScroll(androidx.compose.foundation.rememberScrollState()),
+                )
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton({
+                context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text), "Share crash report"))
+            }) { androidx.compose.material3.Text("Share", color = Ink.Text) }
+        },
+        dismissButton = { androidx.compose.material3.TextButton(onDismiss) { androidx.compose.material3.Text("Dismiss", color = Ink.Secondary) } },
+    )
 }

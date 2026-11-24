@@ -26,7 +26,8 @@ object Templates {
         val currency: String? = null,
     )
 
-    private val token = Regex("""\{([a-z_]+)}""")
+    // Both braces escaped: Android's regex engine rejects a lone "}" that desktop Java accepts.
+    private val token = Regex("""\{([a-z_]+)\}""")
 
     fun apply(template: String, v: Values): String {
         val map = mapOf(

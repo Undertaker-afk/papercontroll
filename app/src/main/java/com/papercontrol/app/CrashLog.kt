@@ -45,6 +45,16 @@ object CrashLog {
         appendLine("${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) · ${Build.SUPPORTED_ABIS.joinToString()}")
         appendLine("Thread: $thread")
         appendLine()
+        // The root cause first: long traces get cut off, and the cause is what matters.
+        var e: Throwable? = error
+        var depth = 0
+        while (e != null && depth < 6) {
+            appendLine((if (depth == 0) "Error: " else "Caused by: ") + e.javaClass.name + ": " + e.message)
+            e.stackTrace.firstOrNull { it.className.startsWith("com.papercontrol") }?.let { appendLine("    at $it") }
+            e = e.cause.takeIf { it !== e }
+            depth++
+        }
+        appendLine()
         append(Log.getStackTraceString(error).take(6000))
     }
 }
